@@ -148,12 +148,29 @@ ForgeConfig ForgeConfig::load() {
         return s.isNotEmpty() ? static_cast<float>(s.getDoubleValue()) : fallback;
     };
 
-    cfg.timeoutMs    = juce::jlimit(2000,  120000, intOr("timeout_ms", "FORGE_GENERATION_TIMEOUT_MS", 12000));
+    cfg.timeoutMs    = juce::jlimit(5000,  180000, intOr("timeout_ms", "FORGE_GENERATION_TIMEOUT_MS", 60000));
+
+    // Migration. Earlier builds wrote every field to config.json, including
+    // tuning values the user was never shown and never chose. That meant a
+    // stale 12s timeout - which is far too short for Sonnet 5's adaptive
+    // thinking - outlived the code change that fixed it, and every generation
+    // aborted mid-flight while still being billed for the tokens.
+    //
+    // A timeout below 30s in a v1 file can only have come from that
+    // auto-written default, so it is discarded rather than honoured.
+    const int version = intOr("config_version", "FORGE_CONFIG_VERSION", 1);
+    if (version < kConfigVersion && cfg.timeoutMs < 30000)
+        cfg.timeoutMs = 60000;
     cfg.maxRetries   = juce::jlimit(0,     3,      intOr("max_retries", "FORGE_MAX_RETRIES", 1));
     cfg.temperature  = juce::jlimit(0.0f,  1.5f,   floatOr("temperature", "FORGE_TEMPERATURE", 0.7f));
     cfg.polyphony    = juce::jlimit(1,     32,     intOr("polyphony", "FORGE_POLYPHONY", 16));
     cfg.cpuBudget    = juce::jlimit(0.05f, 0.9f,   floatOr("cpu_budget", "FORGE_CPU_BUDGET", 0.35f));
     cfg.forceOffline = intOr("force_offline", "FORGE_FORCE_OFFLINE", 0) != 0;
+
+    const auto thinking = lookup(json, dotenv, "thinking", "FORGE_THINKING");
+    if (thinking.isNotEmpty()) cfg.thinkingMode = thinking.trim().toLowerCase();
+    const auto effortLevel = lookup(json, dotenv, "effort", "FORGE_EFFORT");
+    if (effortLevel.isNotEmpty()) cfg.effort = effortLevel.trim().toLowerCase();
     cfg.logRawResponses = intOr("log_raw_responses", "FORGE_LOG_RAW_RESPONSES", 0) != 0;
 
     return cfg;
@@ -161,17 +178,19 @@ ForgeConfig ForgeConfig::load() {
 
 void ForgeConfig::save() const {
     auto* obj = new juce::DynamicObject();
-    obj->setProperty("provider",    providerToString(provider));
-    obj->setProperty("api_key",     apiKey);
-    obj->setProperty("model",       model);
-    obj->setProperty("base_url",    baseUrl);
-    obj->setProperty("timeout_ms",  timeoutMs);
-    obj->setProperty("max_retries", maxRetries);
-    obj->setProperty("temperature", temperature);
-    obj->setProperty("polyphony",   polyphony);
-    obj->setProperty("cpu_budget",  cpuBudget);
+    obj->setProperty("config_version", kConfigVersion);
+
+    // Only what the user actually chose in the Settings panel. Tuning values
+    // (timeout, retries, temperature, polyphony, CPU budget) are deliberately
+    // NOT persisted: writing them back would freeze whatever the code default
+    // happened to be on the day the file was created, and every future fix to
+    // those defaults would silently fail to reach anyone who had ever opened
+    // Settings. They remain overridable through the environment or by hand.
+    obj->setProperty("provider",      providerToString(provider));
+    obj->setProperty("api_key",       apiKey);
+    obj->setProperty("model",         model);
+    obj->setProperty("base_url",      baseUrl);
     obj->setProperty("force_offline", forceOffline ? 1 : 0);
-    obj->setProperty("log_raw_responses", logRawResponses ? 1 : 0);
 
     configDirectory().createDirectory();
     configFile().replaceWithText(juce::JSON::toString(juce::var(obj), false));

@@ -80,7 +80,7 @@ void InstrumentLibrary::loadFromDisk() {
         LibraryEntry entry;
         entry.id      = file.getFileNameWithoutExtension().upToLastOccurrenceOf(".forge", false, false);
         if (entry.id.isEmpty()) entry.id = file.getFileNameWithoutExtension();
-        entry.name    = juce::String(inst.name);
+        entry.name    = uniqueName(juce::String(inst.name));
         entry.onDisk  = true;
         entry.created = file.getCreationTime().toMilliseconds();
 
@@ -101,24 +101,52 @@ void InstrumentLibrary::loadFromDisk() {
                      });
 }
 
+juce::String InstrumentLibrary::uniqueName(const juce::String& wanted,
+                                           const juce::String& ignoreId) const {
+    // Strip any existing " (n)" so repeated regeneration does not stack up
+    // into "Bass (1) (1) (1)".
+    juce::String base = wanted.trim();
+    if (base.endsWithChar(')')) {
+        const int open = base.lastIndexOfChar('(');
+        if (open > 0 && base.substring(open + 1, base.length() - 1).containsOnly("0123456789"))
+            base = base.substring(0, open).trim();
+    }
+    if (base.isEmpty()) base = "Instrument";
+
+    auto taken = [this, &ignoreId](const juce::String& candidate) {
+        for (const auto& e : entries_)
+            if (e.id != ignoreId && e.name.equalsIgnoreCase(candidate)) return true;
+        return false;
+    };
+
+    if (!taken(base)) return base;
+    for (int n = 1; n < 1000; ++n) {
+        const auto candidate = base + " (" + juce::String(n) + ")";
+        if (!taken(candidate)) return candidate;
+    }
+    return base;
+}
+
 juce::String InstrumentLibrary::add(const ir::Instrument& instrument,
                                     const juce::String& prompt,
                                     bool persist) {
     LibraryEntry entry;
     entry.id      = makeId(instrument);
-    entry.name    = juce::String(instrument.name);
     entry.prompt  = prompt;
     entry.created = juce::Time::currentTimeMillis();
     entry.onDisk  = persist;
     entry.instrument = instrument;
 
-    // Regenerating the same thing twice should not fill the list with clones.
+    // Regenerating byte-identical output should not fill the list with clones.
     for (auto& existing : entries_) {
         if (existing.id == entry.id) {
             existing.prompt = prompt;
             return existing.id;
         }
     }
+
+    entry.name = uniqueName(juce::String(instrument.name));
+    entry.instrument.name = entry.name.toStdString();
 
     if (persist) writeToDisk(entry);
     const auto id = entry.id;
@@ -139,8 +167,8 @@ bool InstrumentLibrary::remove(const juce::String& id) {
 bool InstrumentLibrary::rename(const juce::String& id, const juce::String& newName) {
     for (auto& e : entries_) {
         if (e.id != id) continue;
-        e.name = newName;
-        e.instrument.name = newName.toStdString();
+        e.name = uniqueName(newName, id);
+        e.instrument.name = e.name.toStdString();
         if (e.onDisk) writeToDisk(e);
         return true;
     }

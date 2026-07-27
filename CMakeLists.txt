@@ -49,6 +49,7 @@ include(FetchContent)
 add_library(forge_core STATIC
     src/core/dsp/Registry.cpp
     src/core/dsp/Modules.cpp
+    src/core/dsp/ModulesFx.cpp
     src/core/dsp/AssetBaker.cpp
     src/core/dsp/GraphInstance.cpp
     src/core/dsp/GraphBuilder.cpp

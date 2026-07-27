@@ -35,22 +35,29 @@ juce::String HttpLlmProvider::endpoint() const {
 }
 
 juce::String HttpLlmProvider::extraHeaders() const {
-    juce::String h = "Content-Type: application/json\r\n";
+    // Header lines are joined WITHOUT a trailing terminator. JUCE appends its
+    // own separator, and a dangling "\r\n" produces a malformed request that
+    // WinINet rejects before it ever leaves the machine - which surfaces as a
+    // null stream with no status code, i.e. indistinguishable from the network
+    // being down.
+    juce::StringArray headers;
+    headers.add("content-type: application/json");
+
     switch (config_.provider) {
         case ForgeConfig::Provider::OpenAi:
-            h += "Authorization: Bearer " + config_.apiKey + "\r\n";
+            headers.add("authorization: Bearer " + config_.apiKey);
             break;
         case ForgeConfig::Provider::Ollama:
             break;   // local, no auth
         default:
-            h += "x-api-key: " + config_.apiKey + "\r\n";
-            h += "anthropic-version: 2023-06-01\r\n";
+            headers.add("x-api-key: " + config_.apiKey);
+            headers.add("anthropic-version: 2023-06-01");
             break;
     }
-    return h;
+    return headers.joinIntoString("\r\n");
 }
 
-juce::String HttpLlmProvider::buildBody(const GenerationRequest& req) const {
+juce::String HttpLlmProvider::buildBody(const GenerationRequest& req, bool includeTuning) const {
     json messages = json::array();
     messages.push_back(textBlock("user", req.userMessage));
 
@@ -71,10 +78,10 @@ juce::String HttpLlmProvider::buildBody(const GenerationRequest& req) const {
             body = {
                 {"model", config_.effectiveModel().toStdString()},
                 {"messages", all},
-                {"temperature", req.temperature},
                 {"max_tokens", req.maxTokens},
                 {"response_format", {{"type", "json_object"}}}
             };
+            if (includeTuning) body["temperature"] = req.temperature;
             break;
         }
         case ForgeConfig::Provider::Ollama: {
@@ -86,9 +93,9 @@ juce::String HttpLlmProvider::buildBody(const GenerationRequest& req) const {
                 {"messages", all},
                 {"stream", false},
                 {"format", "json"},
-                {"options", {{"temperature", req.temperature},
-                             {"num_predict", req.maxTokens}}}
+                {"options", {{"num_predict", req.maxTokens}}}
             };
+            if (includeTuning) body["options"]["temperature"] = req.temperature;
             break;
         }
         default: {
@@ -109,9 +116,26 @@ juce::String HttpLlmProvider::buildBody(const GenerationRequest& req) const {
                      {"cache_control", {{"type", "ephemeral"}}}}
                 })},
                 {"messages", messages},
-                {"temperature", req.temperature},
                 {"max_tokens", req.maxTokens}
             };
+            // NOTE: no temperature / top_p / top_k. Claude Sonnet 5 rejects any
+            // non-default sampling parameter with a 400 - adaptive thinking is
+            // on by default and the two are incompatible. Anthropic's guidance
+            // is to constrain output in the prompt instead, which is what the
+            // "Return only the JSON object" instruction already does.
+            //
+            // Thinking is disabled by default. Adaptive thinking pushed a
+            // single generation past 60 s, and because JUCE applies its timeout
+            // per-read - and no bytes flow while the model thinks - that reads
+            // as a dead connection rather than a slow one. This task is
+            // schema-filling against worked examples, so the reasoning pass
+            // buys latency and billed output tokens more than quality.
+            if (includeTuning) {
+                if (config_.thinkingMode == "off")
+                    body["thinking"] = {{"type", "disabled"}};
+                else if (config_.effort.isNotEmpty())
+                    body["effort"] = config_.effort.toStdString();
+            }
             break;
         }
     }
@@ -129,33 +153,65 @@ GenerationResult HttpLlmProvider::generate(const GenerationRequest& req,
         return result;
     }
 
-    juce::URL url(endpoint());
-    url = url.withPOSTData(buildBody(req));
-
     int statusCode = 0;
-    juce::StringPairArray responseHeaders;
-
-    auto options = juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inPostData)
-                       .withExtraHeaders(extraHeaders())
-                       .withConnectionTimeoutMs(req.timeoutMs)
-                       .withResponseHeaders(&responseHeaders)
-                       .withStatusCode(&statusCode)
-                       .withNumRedirectsToFollow(3)
-                       .withHttpRequestCmd("POST");
+    juce::String body;
 
     // Note: this read blocks. Cancellation is checked around it and enforced by
-    // the connection timeout - the session treats a late result as stale rather
-    // than trying to tear the socket down underneath JUCE.
-    std::unique_ptr<juce::InputStream> stream(url.createInputStream(options));
-    result.latencyMs = juce::Time::getMillisecondCounterHiRes() - start;
+    // the timeout - the session treats a late result as stale rather than
+    // trying to tear the socket down underneath JUCE.
+    auto send = [&](bool includeTuning) -> bool {
+        statusCode = 0;
+        juce::StringPairArray responseHeaders;
+        juce::URL url = juce::URL(endpoint()).withPOSTData(buildBody(req, includeTuning));
 
-    if (stream == nullptr) {
-        result.errorMessage = "Could not reach " + endpoint().toStdString()
-                            + ". Check the network and the base URL.";
-        return result;
+        auto options = juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inPostData)
+                           .withExtraHeaders(extraHeaders())
+                           .withConnectionTimeoutMs(req.timeoutMs)
+                           .withResponseHeaders(&responseHeaders)
+                           .withStatusCode(&statusCode)
+                           .withNumRedirectsToFollow(3)
+                           .withHttpRequestCmd("POST");
+
+        std::unique_ptr<juce::InputStream> stream(url.createInputStream(options));
+        if (stream == nullptr) return false;
+        body = stream->readEntireStreamAsString();
+        return true;
+    };
+
+    bool reached = send(true);
+
+    // Provider APIs move. If a request is rejected specifically because of an
+    // optional tuning parameter, strip them and try once more rather than
+    // failing the generation over a knob we did not need.
+    if (reached && statusCode == 400) {
+        const auto lower = body.toLowerCase();
+        if (lower.contains("thinking") || lower.contains("effort")
+            || lower.contains("temperature") || lower.contains("top_p")
+            || lower.contains("top_k") || lower.contains("unexpected")) {
+            reached = send(false);
+        }
     }
 
-    const juce::String body = stream->readEntireStreamAsString();
+    result.latencyMs = juce::Time::getMillisecondCounterHiRes() - start;
+
+    if (!reached) {
+        const int elapsed = static_cast<int>(result.latencyMs);
+        // Distinguish "gave up waiting" from "never connected": with a large
+        // prompt and adaptive thinking, a timeout is by far the more likely of
+        // the two and needs a completely different fix.
+        if (elapsed >= req.timeoutMs - 500) {
+            result.errorMessage = "Timed out after " + std::to_string(elapsed / 1000)
+                                + "s with no data received. If FORGE_THINKING is "
+                                  "'adaptive', set it to 'off' - JUCE times out per read, "
+                                  "and no bytes arrive while the model is thinking.";
+        } else {
+            result.errorMessage = "Could not reach " + endpoint().toStdString()
+                                + " (no response after " + std::to_string(elapsed)
+                                + " ms). Check the network, any proxy or firewall, and "
+                                  "the base URL.";
+        }
+        return result;
+    }
 
     if (shouldCancel && shouldCancel()) {
         result.errorMessage = "Cancelled.";

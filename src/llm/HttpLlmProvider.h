@@ -18,7 +18,9 @@ public:
     GenerationResult generate(const GenerationRequest&, const CancelCheck&) override;
 
 private:
-    juce::String buildBody(const GenerationRequest&) const;
+    /// `includeTuning` false strips every optional knob (thinking, effort,
+    /// temperature) so a request rejected for one of them can be retried bare.
+    juce::String buildBody(const GenerationRequest&, bool includeTuning) const;
     juce::String endpoint() const;
     juce::String extraHeaders() const;
 

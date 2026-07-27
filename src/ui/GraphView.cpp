@@ -2,6 +2,7 @@
 
 #include "core/dsp/Registry.h"
 #include "core/ir/IrValidator.h"
+#include "ui/Fonts.h"
 #include "ui/ForgeLookAndFeel.h"
 
 #include <map>
@@ -75,7 +76,7 @@ void GraphView::paint(juce::Graphics& g) {
 
     if (!hasInstrument_ || boxes_.empty()) {
         g.setColour(ForgeLookAndFeel::textSecondary());
-        g.setFont(juce::Font(juce::FontOptions(13.0f)));
+        g.setFont(fonts::body());
         g.drawFittedText("No instrument loaded.", getLocalBounds(),
                          juce::Justification::centred, 1);
         return;
@@ -127,13 +128,13 @@ void GraphView::paint(juce::Graphics& g) {
         g.drawRoundedRectangle(box.bounds, 4.0f, 1.0f);
 
         g.setColour(ForgeLookAndFeel::textPrimary());
-        g.setFont(juce::Font(juce::FontOptions(10.5f)));
-        g.drawFittedText(box.type, box.bounds.toNearestInt().reduced(4, 1),
+        g.setFont(fonts::get(10.0f, fonts::Weight::Medium));
+        g.drawFittedText(box.type, box.bounds.toNearestInt().reduced(5, 1),
                          juce::Justification::centredLeft, 1);
     }
 
-    g.setColour(ForgeLookAndFeel::textSecondary());
-    g.setFont(juce::Font(juce::FontOptions(11.0f)));
+    g.setColour(ForgeLookAndFeel::textDim());
+    g.setFont(fonts::caption());
     g.drawText(juce::String(static_cast<int>(instrument_.nodes.size())) + " modules  -  "
                    + juce::String(static_cast<int>(instrument_.audio.size())) + " audio  -  "
                    + juce::String(static_cast<int>(instrument_.mod.size())) + " modulation",

@@ -185,7 +185,43 @@ calls for it.
 
 Loudness discipline: oscillator levels around 0.6-0.8, and if two oscillators
 both run hot, use connection gains below 1.0. The output stage limits, but
-arriving at it already clipped sounds worse than arriving with headroom.)";
+arriving at it already clipped sounds worse than arriving with headroom.
+
+## Production polish
+
+The difference between an instrument that sounds like a synthesis demo and one
+that sounds like a record is almost never the oscillator. Budget one or two of
+these into most instruments:
+
+- fx.eq3 is the highest-value effect in the library. A gentle cut around
+  200-400 Hz removes mud; a high shelf above 8 kHz adds air. Use it before
+  reaching for anything exotic.
+- fx.width on pads, keys and leads (width 1.2-1.6). Leave basses at 1.0 - wide
+  low end collapses on a club system.
+- fx.tape for anything described as vintage, warm, analog, lofi or dusty. It
+  compresses, dulls the top and adds pitch drift in one move.
+- fx.transient to make plucks snap (attack 0.3-0.6) or to soften a harsh
+  attack (negative values).
+- fx.dimension instead of fx.chorus when you want width without wobble - it is
+  the Juno/Dimension-D sound and it flatters pads and electric pianos.
+- fx.pitch at -12 or +12 with a low mix thickens a lead an octave down, or
+  builds shimmer reverb when placed before fx.reverb with feedback.
+- mod.sequencer routed at a filter cutoff turns a static pad into a rhythmic
+  one. Tempo-synced by default.
+
+Multiband processing: there is no splitter node, because every node has one
+output. Instead feed one source into TWO filter.crossover nodes at the same
+frequency - one with band "low", one with band "high" - process each chain
+separately, and sum both into the next node. That is how you drive the top end
+without destroying the bass.
+
+Character modules, used deliberately rather than by default:
+- fx.freq_shifter: inharmonic and metallic. Small shifts (under 20 Hz) give
+  slow phasing; large shifts give clangorous, bell-like results.
+- filter.formant: vocal and talking textures. Modulate morph from an LFO.
+- osc.karplus: a real plucked-string physical model. Reach for it for guitars,
+  harps, kotos and mallets instead of trying to fake them with a filter
+  envelope.)";
 
 std::string exampleBlock() {
     std::ostringstream os;

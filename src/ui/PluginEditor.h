@@ -2,6 +2,7 @@
 
 #include "plugin/PluginProcessor.h"
 #include "ui/ChatView.h"
+#include "ui/ForgeKeyboard.h"
 #include "ui/ForgeLookAndFeel.h"
 #include "ui/InstrumentView.h"
 
@@ -10,46 +11,49 @@
 
 namespace forge {
 
+/// 7:3 horizontal, the proportions instrument plugins actually use. Everything
+/// that is not a control lives in one 34px header and one 16px status strip;
+/// configuration hides behind a single menu rather than a row of buttons.
 class ForgeEditor final : public juce::AudioProcessorEditor,
-                          private ForgeAudioProcessor::Listener {
+                          private ForgeAudioProcessor::Listener,
+                          private juce::Timer {
 public:
-    /// Parameter is named `owner` rather than `processor` because
-    /// AudioProcessorEditor already has a `processor` member.
     explicit ForgeEditor(ForgeAudioProcessor& owner);
     ~ForgeEditor() override;
 
     void paint(juce::Graphics&) override;
     void resized() override;
+    /// Clicking dead space hands the keystrokes back to the keyboard.
+    void mouseDown(const juce::MouseEvent&) override;
 
 private:
     void forgeStateChanged() override;
     void forgeProgress(const juce::String&) override;
+    void timerCallback() override;
 
     void refreshInstrumentMenu();
+    void showMainMenu();
     void showSettings();
-    void showScreenForState();
+    void showRenameDialog();
+    void applyScreenState();
+    void drawMeter(juce::Graphics&, juce::Rectangle<int>) const;
 
     ForgeAudioProcessor& processor_;
     ForgeLookAndFeel     lookAndFeel_;
 
     juce::ComboBox   instrumentBox_;
-    juce::TextButton editButton_{"Edit with chat"};
-    juce::TextButton settingsButton_{"Settings"};
-    juce::Label      titleLabel_, subtitleLabel_, statusLabel_;
+    juce::TextButton menuButton_{"Menu"};
 
     ChatView         chatView_;
     InstrumentView   instrumentView_;
 
-    /// Playable with the mouse, and with the computer keyboard (A W S E D ...)
-    /// whenever it holds focus. Shown only on the instrument screen - the chat
-    /// screen needs those keystrokes for typing.
-    juce::MidiKeyboardComponent keyboard_;
-    juce::Label                 keyboardHint_;
+    ForgeKeyboard       keyboard_;
+    juce::TooltipWindow tooltips_{this, 500};
 
-    juce::TooltipWindow tooltips_{this, 600};
-
-    juce::StringArray menuIds_;   ///< parallel to the combo box item ids
+    juce::StringArray menuIds_;
     bool              updatingMenu_ = false;
+    juce::String      progressText_;
+    float             meterLevel_ = 0.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ForgeEditor)
 };

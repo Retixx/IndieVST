@@ -1,5 +1,6 @@
 #include "core/dsp/Registry.h"
 
+#include <algorithm>
 #include <sstream>
 
 namespace forge {
@@ -32,8 +33,27 @@ bool parseTaper(const std::string& s, Taper& out) noexcept {
 // --- Registry --------------------------------------------------------------
 
 Registry::Registry() {
-    modules_.reserve(40);
+    modules_.reserve(64);
     registerBuiltinModules(modules_);
+    registerProductionModules(modules_);
+
+    // Group by category so both the prompt manifest and the printed docs read
+    // as a coherent library rather than as two batches bolted together.
+    static const auto rank = [](const std::string& category) {
+        if (category == "source")    return 0;
+        if (category == "modulator") return 1;
+        if (category == "processor") return 2;
+        if (category == "effect")    return 3;
+        if (category == "utility")   return 4;
+        return 5;   // output last
+    };
+    std::stable_sort(modules_.begin(), modules_.end(),
+                     [](const ModuleManifest& a, const ModuleManifest& b) {
+                         if (rank(a.category) != rank(b.category))
+                             return rank(a.category) < rank(b.category);
+                         return a.type < b.type;
+                     });
+
     for (size_t i = 0; i < modules_.size(); ++i)
         index_[modules_[i].type] = i;
 }

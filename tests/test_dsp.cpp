@@ -335,6 +335,154 @@ TEST_CASE(envelope_actually_shapes_amplitude) {
     CHECK(latePeak > earlyPeak * 3.0f);
 }
 
+TEST_CASE(every_module_is_safe_in_isolation) {
+    // Builds a minimal instrument around each registered module in turn and
+    // hammers its parameters. This is the test that has to keep passing as the
+    // library grows - a new effect with an unclamped feedback path would sail
+    // past every other test in the suite.
+    const auto& registry = Registry::instance();
+    Rng rng(0xA11CE5ull);
+    int covered = 0;
+
+    for (const auto& man : registry.all()) {
+        if (man.type == "out.master") continue;   // implicit, always present
+
+        const bool isSource = man.audioIns == 0 && man.audioOuts > 0;
+        const bool isMod    = man.isModSource;
+        const bool voice    = man.allowVoice;
+        const char* scope   = voice ? "voice" : "global";
+
+        nlohmann::json nodes = nlohmann::json::array();
+        nlohmann::json audio = nlohmann::json::array();
+        nlohmann::json mod   = nlohmann::json::array();
+
+        // Assets so wavetable/envelope/curve-dependent modules can be built.
+        const auto assets = nlohmann::json::parse(R"([
+          {"id":"wt","kind":"wavetable","spec":{"method":"shape","shape":"saw"}},
+          {"id":"cv","kind":"curve","spec":{"method":"breakpoints",
+              "points":[[-1,-0.9],[0,0],[1,0.9]]}},
+          {"id":"ev","kind":"envelope","spec":{"method":"stages","stages":[
+              {"level":1,"time_ms":5},{"level":0,"time_ms":400}]}}
+        ])");
+
+        nlohmann::json settings = nlohmann::json::object();
+        for (const auto& s : man.settings) {
+            if (s.type == SettingDesc::Type::AssetWavetable) settings[s.id] = "wt";
+            if (s.type == SettingDesc::Type::AssetCurve)     settings[s.id] = "cv";
+            if (s.type == SettingDesc::Type::AssetEnvelope)  settings[s.id] = "ev";
+        }
+
+        nodes.push_back({{"id", "src"}, {"type", "osc.analog"}, {"scope", "voice"},
+                         {"settings", {{"wave", "saw"}}}});
+        nodes.push_back({{"id", "amp"}, {"type", "vca"}, {"scope", "voice"}});
+        nodes.push_back({{"id", "env"}, {"type", "env.adsr"}, {"scope", "voice"}});
+        nodes.push_back({{"id", "unit"}, {"type", man.type}, {"scope", scope},
+                         {"settings", settings}});
+        mod.push_back({{"source", "env"}, {"target", "amp.gain"}, {"depth", 1.0}});
+
+        if (isSource) {
+            audio.push_back({{"from", "src"},  {"to", "amp"}});
+            audio.push_back({{"from", "unit"}, {"to", "amp"}});
+            audio.push_back({{"from", "amp"},  {"to", "master"}});
+        } else if (man.audioIns > 0) {
+            if (voice) {
+                audio.push_back({{"from", "src"},  {"to", "unit"}});
+                audio.push_back({{"from", "unit"}, {"to", "amp"}});
+                audio.push_back({{"from", "amp"},  {"to", "master"}});
+            } else {
+                audio.push_back({{"from", "src"},  {"to", "amp"}});
+                audio.push_back({{"from", "amp"},  {"to", "unit"}});
+                audio.push_back({{"from", "unit"}, {"to", "master"}});
+            }
+        } else {
+            audio.push_back({{"from", "src"}, {"to", "amp"}});
+            audio.push_back({{"from", "amp"}, {"to", "master"}});
+        }
+        nodes.push_back({{"id", "master"}, {"type", "out.master"}, {"scope", "global"}});
+
+        // Expose every parameter of the module under test so the sweep can
+        // drive all of them to both extremes.
+        nlohmann::json params = nlohmann::json::array();
+        int exposed = 0;
+        for (const auto& pd : man.params) {
+            if (exposed >= 12) break;
+            params.push_back({{"id", "p" + std::to_string(exposed)},
+                              {"label", pd.id},
+                              {"min", pd.min}, {"max", pd.max}, {"default", pd.def},
+                              {"taper", toString(pd.taper)},
+                              {"bind", nlohmann::json::array({
+                                  {{"node", "unit"}, {"param", pd.id}}})}});
+            ++exposed;
+        }
+
+        if (isMod && !man.params.empty()) {
+            // Point the modulator at something audible.
+            mod.push_back({{"source", "unit"},
+                           {"target", voice ? "amp.pan" : "master.volume"},
+                           {"depth", 1.0}});
+        }
+
+        nlohmann::json j = {
+            {"ir_version", "0.1"}, {"name", man.type}, {"voicing", "poly"},
+            {"polyphony", 4}, {"assets", assets}, {"nodes", nodes},
+            {"audio", audio}, {"mod", mod}, {"params", params}
+        };
+
+        ir::Instrument inst;
+        ir::IrReport report;
+        if (!ir::parse(j.dump(), inst, report)) { test::note(man.type + ": parse failed"); CHECK(false); continue; }
+        ir::repair(inst, report);
+        ir::applySafety(inst, report, 0.35f);
+
+        ir::IrReport buildReport;
+        auto graph = GraphBuilder::build(inst, kSr, buildReport);
+        if (graph == nullptr) {
+            std::string errs;
+            for (const auto& i : buildReport.issues)
+                if (i.level == ir::IrIssue::Level::Error) errs += " " + i.message;
+            test::note(man.type + ": build failed:" + errs);
+            CHECK(false);
+            continue;
+        }
+
+        std::vector<float> l(128), r(128);
+        float* chans[2] = { l.data(), r.data() };
+        graph->noteOn(45, 1.0f);
+        graph->noteOn(69, 0.8f);
+
+        float peak = 0.0f;
+        bool finite = true;
+        for (int block = 0; block < 260; ++block) {
+            // Sweep every exposed parameter, including to both hard extremes.
+            for (int p = 0; p < exposed; ++p) {
+                const float v = (block % 40 == 0) ? 1.0f
+                              : (block % 40 == 20) ? 0.0f
+                                                   : rng.nextUnipolar();
+                graph->setExposedParam(p, v);
+            }
+            if (block == 200) graph->allNotesOff(false);
+            graph->process(chans, 128);
+            for (int i = 0; i < 128; ++i) {
+                if (!isFinite(l[static_cast<size_t>(i)]) || !isFinite(r[static_cast<size_t>(i)]))
+                    finite = false;
+                peak = std::max(peak, std::abs(l[static_cast<size_t>(i)]));
+            }
+        }
+
+        if (!finite || peak > 1.0f || graph->nanGuardTripped())
+            test::note(man.type + ": peak " + std::to_string(peak)
+                       + (finite ? "" : " NON-FINITE")
+                       + (graph->nanGuardTripped() ? " NAN-GUARD" : ""));
+        CHECK(finite);
+        CHECK(peak <= 1.0f);
+        CHECK(!graph->nanGuardTripped());
+        ++covered;
+    }
+
+    test::note("modules exercised: " + std::to_string(covered));
+    CHECK(covered >= 30);
+}
+
 TEST_CASE(asset_baker_produces_safe_tables) {
     {
         Wavetable wt;

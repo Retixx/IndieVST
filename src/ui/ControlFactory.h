@@ -17,12 +17,15 @@
 
 namespace forge {
 
+/// Base cell size. The rack scales these up to fill the window, so these are
+/// proportions rather than fixed pixels - a control derives its knob diameter
+/// and font sizes from whatever bounds it is given.
 namespace cell {
-inline constexpr int width   = 58;
-inline constexpr int height  = 62;
-inline constexpr int knob    = 32;
-inline constexpr int nameH   = 12;
-inline constexpr int valueH  = 11;
+inline constexpr int   width  = 58;
+inline constexpr int   height = 62;
+inline constexpr float nameFrac  = 0.19f;   ///< share of cell height for the name
+inline constexpr float valueFrac = 0.17f;   ///< share of cell height for the readout
+inline constexpr float maxScale  = 2.1f;    ///< beyond this, knobs look comical
 } // namespace cell
 
 class ParamControl final : public juce::Component,
@@ -38,6 +41,8 @@ public:
 
 private:
     void refreshReadout();
+    int  nameHeight() const;
+    int  valueHeight() const;
 
     ForgeParameter& parameter_;
     juce::String    id_, label_, unit_, readout_;

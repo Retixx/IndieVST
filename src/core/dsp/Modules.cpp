@@ -8,6 +8,7 @@
 // Each primitive is declared immediately next to its manifest so that the
 // parameter enum and the manifest ordering can never drift apart.
 // ---------------------------------------------------------------------------
+#include "core/dsp/ModuleKit.h"
 #include "core/dsp/Registry.h"
 
 #include <array>
@@ -16,135 +17,9 @@
 namespace forge {
 namespace {
 
-// --- manifest construction helpers ----------------------------------------
-
-ParamDesc P(std::string id, std::string label, std::string unit,
-            float mn, float mx, float def,
-            Taper taper = Taper::Linear, bool modulatable = true,
-            std::string help = {}) {
-    ParamDesc p;
-    p.id = std::move(id); p.label = std::move(label); p.unit = std::move(unit);
-    p.min = mn; p.max = mx; p.def = def; p.taper = taper;
-    p.modulatable = modulatable; p.help = std::move(help);
-    return p;
-}
-
-SettingDesc SEnum(std::string id, std::vector<std::string> options, std::string def,
-                  std::string help = {}) {
-    SettingDesc s;
-    s.id = std::move(id); s.type = SettingDesc::Type::Enum;
-    s.options = std::move(options); s.def = std::move(def); s.help = std::move(help);
-    return s;
-}
-SettingDesc SFloat(std::string id, float mn, float mx, float def, std::string help = {}) {
-    SettingDesc s;
-    s.id = std::move(id); s.type = SettingDesc::Type::Float;
-    s.min = mn; s.max = mx; s.def = def; s.help = std::move(help);
-    return s;
-}
-SettingDesc SInt(std::string id, int mn, int mx, int def, std::string help = {}) {
-    SettingDesc s;
-    s.id = std::move(id); s.type = SettingDesc::Type::Int;
-    s.min = static_cast<float>(mn); s.max = static_cast<float>(mx);
-    s.def = def; s.help = std::move(help);
-    return s;
-}
-SettingDesc SBool(std::string id, bool def, std::string help = {}) {
-    SettingDesc s;
-    s.id = std::move(id); s.type = SettingDesc::Type::Bool; s.def = def;
-    s.help = std::move(help);
-    return s;
-}
-SettingDesc SAsset(std::string id, SettingDesc::Type t, std::string help = {}) {
-    SettingDesc s;
-    s.id = std::move(id); s.type = t; s.def = std::string{}; s.help = std::move(help);
-    return s;
-}
-
-template <class T> ModuleFactory mk() {
-    return []() -> std::unique_ptr<Module> { return std::make_unique<T>(); };
-}
-
-// --- settings readers (worker thread, tolerant by design) ------------------
-
-std::string getStr(const nlohmann::json* s, const char* key, const char* def) {
-    if (s && s->is_object()) {
-        auto it = s->find(key);
-        if (it != s->end() && it->is_string()) return it->get<std::string>();
-    }
-    return def;
-}
-float getF(const nlohmann::json* s, const char* key, float def) {
-    if (s && s->is_object()) {
-        auto it = s->find(key);
-        if (it != s->end() && it->is_number()) return sanitize(it->get<float>(), def);
-    }
-    return def;
-}
-int getI(const nlohmann::json* s, const char* key, int def) {
-    if (s && s->is_object()) {
-        auto it = s->find(key);
-        if (it != s->end() && it->is_number()) return static_cast<int>(std::lround(it->get<double>()));
-    }
-    return def;
-}
-bool getB(const nlohmann::json* s, const char* key, bool def) {
-    if (s && s->is_object()) {
-        auto it = s->find(key);
-        if (it != s->end() && it->is_boolean()) return it->get<bool>();
-        if (it != s->end() && it->is_number())  return it->get<double>() != 0.0;
-    }
-    return def;
-}
-
-// --- shared small DSP utilities -------------------------------------------
-
-class DelayLine {
-public:
-    void prepare(int maxSamples) {
-        buf_.assign(static_cast<size_t>(std::max(8, maxSamples)), 0.0f);
-        idx_ = 0;
-    }
-    void clear() noexcept { std::fill(buf_.begin(), buf_.end(), 0.0f); idx_ = 0; }
-
-    void write(float v) noexcept {
-        if (buf_.empty()) return;
-        buf_[static_cast<size_t>(idx_)] = sanitize(v);
-        if (++idx_ >= static_cast<int>(buf_.size())) idx_ = 0;
-    }
-
-    float read(float delaySamples) const noexcept {
-        const int n = static_cast<int>(buf_.size());
-        if (n < 4) return 0.0f;
-        const float d = clampT(sanitize(delaySamples, 1.0f), 1.0f, static_cast<float>(n - 2));
-        float pos = static_cast<float>(idx_) - d;
-        while (pos < 0.0f) pos += static_cast<float>(n);
-        int i0 = static_cast<int>(pos);
-        const float t = pos - static_cast<float>(i0);
-        if (i0 >= n) i0 -= n;
-        int i1 = i0 + 1; if (i1 >= n) i1 -= n;
-        return lerp(buf_[static_cast<size_t>(i0)], buf_[static_cast<size_t>(i1)], t);
-    }
-
-    int size() const noexcept { return static_cast<int>(buf_.size()); }
-
-private:
-    std::vector<float> buf_;
-    int idx_ = 0;
-};
-
-/// Base class that stores parameters in a fixed array. Every module gets its
-/// parameters via setParam(index, engineeringValue) once per control block.
-template <int NumParams>
-class ParamHolder : public Module {
-public:
-    void setParam(int index, float value) noexcept override {
-        if (index >= 0 && index < NumParams) p_[static_cast<size_t>(index)] = sanitize(value);
-    }
-protected:
-    float p(int i) const noexcept { return p_[static_cast<size_t>(i)]; }
-    std::array<float, NumParams> p_{};
-};
+// Manifest builders, settings readers, DelayLine and ParamHolder all live in
+// ModuleKit.h so the effects library can share them.
+using namespace kit;
 
 // ===========================================================================
 // SOURCES

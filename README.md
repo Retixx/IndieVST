@@ -188,7 +188,8 @@ chord is still ringing.
 src/core/          JUCE-free: DSP primitives, graph engine, IR, validator, prompt builder
 src/plugin/        AudioProcessor, parameter pool, graph publisher, library, config
 src/llm/           Provider implementations and the async generation session
-src/ui/            Chat screen, generated instrument panel, graph view, look and feel
+src/ui/            Prompt screen, generated instrument rack, graph view, look and feel
+resources/fonts/   Inter, subset and embedded so the UI is identical everywhere
 tests/             Headless test suite, including the IR fuzzer
 resources/canned/  Human-readable mirror of the built-in instruments
 ```

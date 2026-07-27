@@ -83,6 +83,8 @@ public:
     juce::String lastStatus()        const { return lastStatus_; }
     juce::String lastRepairSummary() const { return lastRepairs_; }
     bool         lastUsedFallback()  const { return lastUsedFallback_; }
+    /// Path of the log written by the most recent failed generation, if any.
+    juce::String lastLogPath()       const { return lastLogPath_; }
 
     bool showingChat() const { return showChat_; }
     /// `editCurrent` distinguishes "modify what's loaded" (the Edit button)
@@ -121,7 +123,7 @@ private:
     bool                 hasCurrent_ = false;
     juce::String         currentId_;
     std::vector<ChatTurn> chat_;
-    juce::String         lastStatus_, lastRepairs_;
+    juce::String         lastStatus_, lastRepairs_, lastLogPath_;
     bool                 lastUsedFallback_ = false;
     bool                 showChat_ = true;
     bool                 chatEditsCurrent_ = false;

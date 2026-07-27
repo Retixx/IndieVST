@@ -15,6 +15,9 @@
 
 namespace forge {
 
+/// Bumped whenever a stored field needs migrating. See ForgeConfig::load().
+inline constexpr int kConfigVersion = 2;
+
 struct ForgeConfig {
     enum class Provider { Anthropic, OpenAi, Ollama, Canned };
 
@@ -23,10 +26,21 @@ struct ForgeConfig {
     juce::String model;
     juce::String baseUrl;
 
-    int   timeoutMs   = 12000;
+    /// Sonnet 5 has adaptive thinking on by default, so a 13k-token prompt can
+    /// take far longer than the 12s the original design assumed. Too short a
+    /// timeout looks exactly like the network being down.
+    int   timeoutMs   = 60000;
     int   maxRetries  = 1;
     float temperature = 0.7f;
     bool  forceOffline = false;
+
+    /// Anthropic only. "off" disables extended thinking outright; "adaptive"
+    /// lets the model decide. Generating an instrument graph is a structured
+    /// schema-filling task with worked examples in the prompt, not a reasoning
+    /// problem - thinking mostly buys latency and billed output tokens here.
+    juce::String thinkingMode = "off";        ///< off | adaptive
+    /// Used when thinkingMode is "adaptive": low | medium | high | max
+    juce::String effort = "low";
 
     int   polyphony  = 16;
     float cpuBudget  = 0.35f;

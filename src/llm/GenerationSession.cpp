@@ -20,6 +20,41 @@ juce::String humaniseErrors(const ir::IrReport& report, int maxItems = 3) {
     return lines.joinIntoString("  ");
 }
 
+juce::String fullReport(const ir::IrReport& report) {
+    juce::StringArray lines;
+    for (const auto& i : report.issues) {
+        const char* level = i.level == ir::IrIssue::Level::Error   ? "ERROR"
+                          : i.level == ir::IrIssue::Level::Warning ? "warn "
+                                                                   : "fixed";
+        lines.add(juce::String(level) + "  [" + juce::String(i.path) + "] "
+                  + juce::String(i.message));
+    }
+    return lines.joinIntoString("\n");
+}
+
+/// A failed generation that leaves no trace cannot be fixed. This always runs.
+juce::String writeGenerationLog(const juce::String& prompt,
+                                const juce::String& provider,
+                                const std::string& raw,
+                                const ir::IrReport& report,
+                                const juce::String& outcome) {
+    const auto dir = ForgeConfig::logsDirectory();
+    if (!dir.createDirectory().wasOk()) return {};
+
+    const auto file = dir.getChildFile(
+        "generation-" + juce::Time::getCurrentTime().formatted("%Y%m%d-%H%M%S") + ".log");
+
+    juce::String text;
+    text << "prompt   : " << prompt << "\n"
+         << "provider : " << provider << "\n"
+         << "outcome  : " << outcome << "\n"
+         << "\n--- validator ---\n" << fullReport(report)
+         << "\n\n--- raw model response ---\n"
+         << (raw.empty() ? juce::String("(none)") : juce::String(raw)) << "\n";
+
+    return file.replaceWithText(text) ? file.getFullPathName() : juce::String();
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -67,12 +102,19 @@ private:
         juce::MessageManager::callAsync([fn, text]() { if (fn) fn(text); });
     }
 
-    /// One full attempt: model -> extract -> parse -> validate.
-    /// Returns true when `inst` came back clean with no repair needed.
+    /// One full attempt: model -> extract -> parse -> repair -> safety ->
+    /// validate.
+    ///
+    /// Repair runs BEFORE the verdict on purpose. Judging the raw response and
+    /// only repairing after every retry had been spent meant a graph missing
+    /// nothing but an output connection burned a whole extra API call before
+    /// anyone tried to fix it. Repair is deterministic and free; the model is
+    /// neither.
     bool attempt(llm::LlmProvider& provider,
                  llm::GenerationRequest& request,
                  ir::Instrument& inst,
-                 ir::IrReport& report,
+                 ir::IrReport& errors,
+                 ir::IrReport& repairs,
                  Result& out,
                  std::string& rawOut) {
         const auto response = provider.generate(request, [this] { return cancelled(); });
@@ -83,14 +125,27 @@ private:
         out.usedFallback = out.usedFallback || response.usedFallback;
 
         if (!response.ok) {
-            report.error("", response.errorMessage.empty() ? "The model did not respond."
+            // A transport or API error (bad key, rejected parameter, no
+            // network) will fail identically on a retry. Flag it so we do not
+            // burn another round trip - and several seconds of the
+            // time-to-first-sound budget - proving that.
+            transportFailure_ = true;
+            errors.error("", response.errorMessage.empty() ? "The model did not respond."
                                                            : response.errorMessage);
             return false;
         }
+        transportFailure_ = false;
         rawOut = response.irJson;
 
-        if (!ir::parse(response.irJson, inst, report)) return false;
-        return ir::validate(inst, report);
+        if (!ir::parse(response.irJson, inst, errors)) return false;
+
+        ir::repair(inst, repairs);
+        if (!ir::applySafety(inst, repairs, config_.cpuBudget)) {
+            for (const auto& i : repairs.issues)
+                if (i.level == ir::IrIssue::Level::Error) errors.issues.push_back(i);
+            return false;
+        }
+        return ir::validate(inst, errors);
     }
 
     void run(Result& out) {
@@ -109,41 +164,32 @@ private:
         request.timeoutMs    = config_.timeoutMs;
 
         ir::Instrument inst;
-        ir::IrReport   report;
+        ir::IrReport   errors, repairReport;
         std::string    raw;
-        bool clean = attempt(*provider, request, inst, report, out, raw);
+        bool valid = attempt(*provider, request, inst, errors, repairReport, out, raw);
 
         // --- retry with the validator's own error list -----------------------
-        for (int retry = 0; !clean && retry < config_.maxRetries && !cancelled(); ++retry) {
+        for (int retry = 0; !valid && !transportFailure_
+                            && retry < config_.maxRetries && !cancelled(); ++retry) {
             progress("Fixing...");
-            request.correctionFeedback = report.toModelFeedback();
+            request.correctionFeedback = errors.toModelFeedback();
             request.previousAttempt    = raw;
             inst = ir::Instrument{};
-            report.clear();
-            clean = attempt(*provider, request, inst, report, out, raw);
+            errors.clear();
+            repairReport.clear();
+            valid = attempt(*provider, request, inst, errors, repairReport, out, raw);
         }
 
         if (cancelled()) { out.message = "Cancelled."; return; }
-
-        // --- deterministic repair -------------------------------------------
         progress("Validating...");
-        ir::IrReport repairReport;
-        if (!clean) {
-            // Even a badly broken response usually contains a usable graph.
-            ir::repair(inst, repairReport);
-        } else {
-            // A clean graph still goes through repair: it is a no-op on
-            // something already valid, and it fills in the UI layout when the
-            // model did not provide one.
-            ir::repair(inst, repairReport);
+
+        // Always leave a trace of a failure, and of a success when asked.
+        if (!valid || config_.logRawResponses) {
+            ir::IrReport combined = errors;
+            for (const auto& i : repairReport.issues) combined.issues.push_back(i);
+            out.logPath = writeGenerationLog(prompt_, out.providerName, raw, combined,
+                                             valid ? "ok" : "failed validation");
         }
-
-        inst.polyphony = juce::jlimit(1, kMaxVoices,
-                                      inst.voicing == "poly" ? inst.polyphony : 1);
-        const bool safe = ir::applySafety(inst, repairReport, config_.cpuBudget);
-
-        ir::IrReport finalReport;
-        const bool valid = safe && ir::validate(inst, finalReport);
 
         // --- last resort: the offline library --------------------------------
         if (!valid) {
@@ -164,18 +210,15 @@ private:
                     if (ir::validate(fb, check)) {
                         inst = std::move(fb);
                         out.usedFallback = true;
-                        const juce::String why = humaniseErrors(finalReport.hasErrors() ? finalReport
-                                                                                        : report);
+                        const juce::String why = humaniseErrors(errors);
                         out.message = why.isEmpty()
                             ? "I had trouble with that one - here's a starting point you can edit."
-                            : "I had trouble with that one (" + why
-                              + ") - here's a starting point you can edit.";
+                            : "Fell back: " + why;
                     }
                 }
             }
             if (!out.usedFallback) {
-                out.message = "Generation failed: " + humaniseErrors(finalReport.hasErrors()
-                                                                      ? finalReport : report);
+                out.message = "Generation failed: " + humaniseErrors(errors);
                 return;
             }
         }
@@ -207,6 +250,7 @@ private:
     juce::String prompt_, currentIr_;
     ProgressFn   onProgress_;
     CompleteFn   onComplete_;
+    bool transportFailure_ = false;
     std::shared_ptr<std::atomic<bool>> cancelFlag_;
     std::atomic<bool>* runningFlag_;
 };

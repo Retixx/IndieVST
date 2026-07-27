@@ -500,7 +500,16 @@ diffing at 32 nodes is not worth the failure modes.
    non-alarming message: *"I had trouble with that one — here's a starting point you can
    edit."*
 
-Total wall-clock budget: **12 s** to first sound. Hard cancel button on the chat screen.
+Total wall-clock budget: **60 s** to first sound, typically 20-40 s. Hard cancel
+button on the chat screen.
+
+> **Revised from 12 s after live testing.** Claude Sonnet 5 has adaptive thinking
+> enabled by default, so a ~13k-token capability manifest plus a full instrument
+> graph regularly takes 20-40 s. The original 12 s ceiling did not merely rush the
+> model — it aborted the connection before any response arrived, which surfaced as
+> "could not reach the API" and was indistinguishable from the network being down.
+> Latency is now a pacing problem to be covered by honest progress states, not a
+> limit to be enforced.
 
 ### 7.4 Threading
 
@@ -754,7 +763,7 @@ overruns, you cut scope from the *next* day, never from the safety layer.
 | 1 | IR structs + JSON round-trip. `GraphBuilder`: IR → GraphInstance. |
 | 2 | `IrValidator` + `IrSafety` + `IrRepair`. Unit tests. **Do not skip — this is the load-bearing wall.** |
 | 3 | Manifest emission from the registry; `PromptBuilder` with heuristics + 3 few-shot examples. |
-| 4 | `LlmProvider` interface + one real provider + `CannedProvider`. Async session with cancel and 12 s timeout. |
+| 4 | `LlmProvider` interface + one real provider + `CannedProvider`. Async session with cancel and a 60 s timeout. |
 | 5 | Wire prompt → IR → validate → build → swap. **Milestone: type text, hear a new instrument.** |
 | 6 | Remaining primitives: `osc.wavetable`, `osc.fm2`, `filter.ladder`, `shaper.wave`, `fx.delay`, `fx.reverb`, `fx.chorus`, `fx.drive`, `env.multi`, keytrack/velocity. `AssetBaker`. |
 
@@ -787,7 +796,7 @@ overruns, you cut scope from the *next* day, never from the safety layer.
 
 - [ ] VST3 loads in Reaper, FL Studio, and Ableton Live on Windows x64.
 - [ ] Passes pluginval strictness 8.
-- [ ] Prompt → playable instrument in ≤ 12 s, ≥ 90 % of the time, over 30 varied prompts.
+- [ ] Prompt → playable instrument in ≤ 60 s, ≥ 90 % of the time, over 30 varied prompts.
 - [ ] All 30 outputs are *safe*: no clipping above −0.3 dBFS, no NaN, no runaway feedback,
       no CPU spike above budget.
 - [ ] ≥ 3 structurally distinct topologies observed across the 30 (proving it isn't one
@@ -918,7 +927,7 @@ The architecture already supports this cleanly:
 | Risk | Severity | Mitigation |
 |---|---|---|
 | LLM output is valid but musically bad | **High** | Sound-design heuristics + few-shot examples in the prompt; 30-prompt sweep on Day 3 with prompt tuning until ≥ 80 % land; canned fallbacks for demo prompts. |
-| Generation latency kills demo pacing | High | 12 s hard timeout, honest progress states, pre-generated backups in the dropdown, network-off rehearsal. |
+| Generation latency kills demo pacing | High | 60 s timeout, honest progress states, pre-generated backups in the dropdown, network-off rehearsal. Talk over the wait — the graph panel gives you something to narrate. |
 | VST3 dynamic parameter naming misbehaves in Ableton | Medium | Static pool + own GUI always correct (§9.1); demo primarily in Reaper. |
 | 3 days is not enough | **High** | Day-by-day demoable milestones; explicit cut list (§12); safety layer is never cut. |
 | Real-time safety bug → crash in the DAW on stage | **Critical** | Strict `processBlock` rules, lock-free swap, retire queue, pluginval 8, 10-minute soak test. |

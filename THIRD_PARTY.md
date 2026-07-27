@@ -6,6 +6,20 @@
 | [VST3 SDK](https://github.com/steinbergmedia/vst3sdk) | bundled with JUCE | GPLv3 **or** Steinberg proprietary licence | ships inside JUCE |
 | [nlohmann/json](https://github.com/nlohmann/json) | 3.11.3 | MIT | vendored at `third_party/nlohmann/json.hpp` |
 | [Catch2](https://github.com/catchorg/Catch2) | 3.x | BSL-1.0 | CMake `FetchContent`, tests only (optional) |
+| [Inter](https://github.com/rsms/inter) | 4.x | SIL Open Font License 1.1 | vendored at `resources/fonts/`, embedded in the binary |
+
+## Fonts
+
+Inter is embedded in three static weights (Regular 400, Medium 500, SemiBold 600),
+instanced from the upstream variable font and subset to Latin so each weight is ~41 KB.
+Embedding rather than depending on installed system fonts is what makes the plugin look
+identical on every machine.
+
+The SIL OFL permits bundling and redistribution, including in commercial and closed-source
+products, provided the licence text travels with the fonts — it does, at
+`resources/fonts/Inter-OFL.txt`. The only real restriction is that a modified font may not
+be redistributed under the reserved name "Inter"; subsetting and instancing for embedding
+do not trigger that.
 
 ## Licensing position
 

@@ -55,6 +55,12 @@ public:
     juce::var toState() const;
     void      fromState(const juce::var& state);
 
+    /// "Molten Sub" -> "Molten Sub (1)" if that name is already taken.
+    /// Generating the same kind of sound twice is normal, and a dropdown with
+    /// four identical entries is useless.
+    juce::String uniqueName(const juce::String& wanted,
+                            const juce::String& ignoreId = {}) const;
+
 private:
     static juce::String makeId(const ir::Instrument&);
     static juce::File   fileFor(const juce::String& id);

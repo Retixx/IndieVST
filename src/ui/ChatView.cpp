@@ -1,5 +1,6 @@
 #include "ui/ChatView.h"
 
+#include "ui/Fonts.h"
 #include "ui/ForgeLookAndFeel.h"
 
 namespace forge {
@@ -13,30 +14,18 @@ const char* kPlaceholders[] = {
     "a mono acid lead with vibrato on the mod wheel",
 };
 
-const char* kQuickStarts[] = {
-    "warm analog bass",
-    "glassy pad",
-    "metallic pluck",
-};
+const char* kQuickStarts[] = { "warm analog bass", "glassy pad", "metallic pluck", "FM bell" };
 
 } // namespace
 
 ChatView::ChatView(ForgeAudioProcessor& processor) : processor_(processor) {
-    transcript_.setMultiLine(true, true);
-    transcript_.setReadOnly(true);
-    transcript_.setScrollbarsShown(true);
-    transcript_.setCaretVisible(false);
-    transcript_.setPopupMenuEnabled(false);
-    transcript_.setColour(juce::TextEditor::outlineColourId, juce::Colours::transparentBlack);
-    transcript_.setColour(juce::TextEditor::backgroundColourId, ForgeLookAndFeel::panel());
-    transcript_.setFont(juce::Font(juce::FontOptions(14.0f)));
-    addAndMakeVisible(transcript_);
-
     prompt_.setMultiLine(false, false);
     prompt_.setReturnKeyStartsNewLine(false);
+    prompt_.setJustification(juce::Justification::centredLeft);
     prompt_.setTextToShowWhenEmpty(kPlaceholders[juce::Random::getSystemRandom().nextInt(5)],
-                                   ForgeLookAndFeel::textSecondary());
-    prompt_.setFont(juce::Font(juce::FontOptions(15.0f)));
+                                   ForgeLookAndFeel::textDim());
+    prompt_.setFont(fonts::prompt());
+    prompt_.setIndents(10, 0);
     prompt_.onReturnKey = [this] { submit(); };
     addAndMakeVisible(prompt_);
 
@@ -44,12 +33,7 @@ ChatView::ChatView(ForgeAudioProcessor& processor) : processor_(processor) {
     addAndMakeVisible(sendButton_);
 
     cancelButton_.onClick = [this] { processor_.cancelGeneration(); };
-    cancelButton_.setVisible(false);
     addChildComponent(cancelButton_);
-
-    statusLabel_.setJustificationType(juce::Justification::centredLeft);
-    statusLabel_.setColour(juce::Label::textColourId, ForgeLookAndFeel::textSecondary());
-    addAndMakeVisible(statusLabel_);
 
     for (const char* quick : kQuickStarts) {
         auto* b = new juce::TextButton(quick);
@@ -71,77 +55,96 @@ void ChatView::submit() {
     const auto text = prompt_.getText().trim();
     if (text.isEmpty() || processor_.isGenerating()) return;
     prompt_.clear();
-    // Editing applies only when the user arrived here via "Edit with chat".
-    // Choosing "Create New Instrument" always starts from scratch.
     processor_.generate(text, processor_.chatEditsCurrent());
 }
 
 void ChatView::refresh() {
-    juce::String text;
-    for (const auto& turn : processor_.chatLog()) {
-        text << (turn.fromUser ? "You:  " : "Forge:  ") << turn.text << "\n\n";
-    }
-    if (text.isEmpty())
-        text = "Describe an instrument and Forge will build it.\n\n"
-               "It picks the modules, wires the signal path, designs the modulation "
-               "and lays out the controls. Then you can keep talking to it.\n";
-
-    transcript_.setText(text, false);
-    transcript_.moveCaretToEnd();
-
     const bool busy = processor_.isGenerating();
-    sendButton_.setEnabled(!busy);
+    sendButton_.setVisible(!busy);
     cancelButton_.setVisible(busy);
     prompt_.setEnabled(!busy);
     for (auto* b : suggestions_) b->setEnabled(!busy);
 
+    // Echo only the latest exchange, as one line.
+    resultText_.clear();
+    const auto& log = processor_.chatLog();
+    for (auto it = log.rbegin(); it != log.rend(); ++it) {
+        if (!it->fromUser) { resultText_ = it->text; break; }
+    }
     if (!busy) progressText_ = processor_.lastStatus();
-    statusLabel_.setText(progressText_, juce::dontSendNotification);
+
+    resized();
+    repaint();
 }
 
 void ChatView::setProgress(const juce::String& text) {
     progressText_ = text;
-    statusLabel_.setText(text, juce::dontSendNotification);
     repaint();
 }
 
 void ChatView::focusPrompt() { prompt_.grabKeyboardFocus(); }
 
 void ChatView::timerCallback() {
-    if (!processor_.isGenerating()) return;
-    spinnerPhase_ = (spinnerPhase_ + 1) % 4;
-    const juce::String dots = juce::String::repeatedString(".", spinnerPhase_);
-    statusLabel_.setText(progressText_.upToFirstOccurrenceOf("...", false, false) + dots,
-                         juce::dontSendNotification);
+    if (processor_.isGenerating()) {
+        spinnerPhase_ = (spinnerPhase_ + 1) % 4;
+        repaint();
+    }
 }
 
 void ChatView::paint(juce::Graphics& g) {
-    g.setColour(ForgeLookAndFeel::panel());
-    g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), 8.0f);
+    // Everything positions off the input field rather than off fractions of
+    // the panel, so nothing can land on top of it at any window size.
+    const int fieldTop = prompt_.getY();
+
+    const juce::Rectangle<int> headline(0, fieldTop - 62, getWidth(), 26);
+    g.setFont(fonts::get(19.0f, fonts::Weight::SemiBold));
+    g.setColour(ForgeLookAndFeel::textPrimary());
+    g.drawFittedText("Describe an instrument.", headline, juce::Justification::centred, 1);
+
+    const juce::Rectangle<int> subtitle(0, fieldTop - 34, getWidth(), 16);
+    g.setFont(fonts::caption());
+    g.setColour(ForgeLookAndFeel::textDim());
+    g.drawFittedText("Forge picks the modules, wires the signal path and lays out the controls.",
+                     subtitle, juce::Justification::centred, 1);
+
+    // Status line under the input: progress while working, result when done.
+    const bool busy = processor_.isGenerating();
+    const auto strip = juce::Rectangle<int>(0, prompt_.getBottom() + 9, getWidth(), 16);
+
+    if (busy) {
+        g.setFont(fonts::caption());
+        g.setColour(accent_);
+        const auto base = progressText_.upToFirstOccurrenceOf("...", false, false);
+        g.drawFittedText(base + juce::String::repeatedString(".", spinnerPhase_),
+                         strip, juce::Justification::centred, 1);
+    } else if (resultText_.isNotEmpty()) {
+        g.setFont(fonts::caption());
+        g.setColour(ForgeLookAndFeel::textSecondary());
+        g.drawFittedText(resultText_, strip.reduced(30, 0), juce::Justification::centred, 1);
+    }
 }
 
 void ChatView::resized() {
-    auto bounds = getLocalBounds().reduced(14);
+    auto bounds = getLocalBounds();
+    const int centreY = bounds.getCentreY();
+    const int fieldW  = juce::jmin(560, bounds.getWidth() - 80);
+    const int fieldX  = bounds.getCentreX() - fieldW / 2;
 
-    auto row = bounds.removeFromBottom(34);
-    if (cancelButton_.isVisible()) {
-        cancelButton_.setBounds(row.removeFromRight(90).reduced(2));
-        row.removeFromRight(4);
+    prompt_.setBounds(fieldX, centreY - 34, fieldW - 104, 32);
+    sendButton_.setBounds(prompt_.getRight() + 6, centreY - 34, 98, 32);
+    cancelButton_.setBounds(sendButton_.getBounds());
+
+    // Quick-start chips, evenly spaced under the status line.
+    const int chipY = prompt_.getBottom() + 33;
+    const int count = suggestions_.size();
+    if (count > 0) {
+        const int chipW = juce::jmin(130, (fieldW - (count - 1) * 6) / count);
+        int x = bounds.getCentreX() - (chipW * count + 6 * (count - 1)) / 2;
+        for (auto* b : suggestions_) {
+            b->setBounds(x, chipY, chipW, 24);
+            x += chipW + 6;
+        }
     }
-    sendButton_.setBounds(row.removeFromRight(110).reduced(2));
-    row.removeFromRight(6);
-    prompt_.setBounds(row.reduced(0, 2));
-
-    bounds.removeFromBottom(6);
-    statusLabel_.setBounds(bounds.removeFromBottom(20));
-
-    bounds.removeFromBottom(6);
-    auto quickRow = bounds.removeFromBottom(28);
-    const int each = suggestions_.isEmpty() ? 0 : quickRow.getWidth() / suggestions_.size();
-    for (auto* b : suggestions_) b->setBounds(quickRow.removeFromLeft(each).reduced(3, 2));
-
-    bounds.removeFromBottom(8);
-    transcript_.setBounds(bounds);
 }
 
 } // namespace forge

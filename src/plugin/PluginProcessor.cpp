@@ -215,6 +215,8 @@ void ForgeAudioProcessor::adoptInstrument(const ir::Instrument& instrument,
     crossfadeGain_ = 0.0f;   // the audio thread fades into the new graph
     publisher_.publish(std::move(graph));
 
+    // Generating or loading an instrument switches to it. Only a fresh launch
+    // returns to the prompt screen.
     showChat_ = false;
     notifyListeners();
 }
@@ -255,6 +257,7 @@ void ForgeAudioProcessor::generate(const juce::String& prompt, bool editCurrent)
             lastStatus_       = result.message;
             lastRepairs_      = result.repairSummary;
             lastUsedFallback_ = result.usedFallback;
+            if (result.logPath.isNotEmpty()) lastLogPath_ = result.logPath;
 
             if (!result.ok) {
                 chat_.push_back({false, result.message, {}});
@@ -354,7 +357,12 @@ void ForgeAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
         }
     }
 
-    showChat_  = static_cast<bool>(root->getProperty("showChat"));
+    // Always open on the prompt screen, whatever the session was last showing.
+    // Describing an instrument is the thing this plugin is for, and the loaded
+    // instrument is only ever one click away in the dropdown - so the stored
+    // flag is deliberately read and discarded rather than honoured.
+    showChat_         = true;
+    chatEditsCurrent_ = false;
     currentId_ = root->getProperty("activeInstrumentId").toString();
 
     const auto irText = root->getProperty("currentIr").toString();

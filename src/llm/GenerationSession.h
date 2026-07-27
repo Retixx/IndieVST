@@ -35,6 +35,10 @@ public:
         juce::String message;        ///< user-facing outcome line
         juce::String repairSummary;  ///< "what I fixed", may be empty
         juce::String providerName;
+        /// Written on every failure. Contains the prompt, the raw model
+        /// response and the full validator output - without it a failed
+        /// generation is unfixable guesswork.
+        juce::String logPath;
         bool         usedFallback = false;
         double       latencyMs    = 0.0;
         int          attempts     = 0;

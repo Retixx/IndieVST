@@ -41,7 +41,11 @@ private:
     std::map<std::string, size_t> index_;
 };
 
-/// Implemented in Modules.cpp - declares every built-in primitive.
+/// Implemented in Modules.cpp - the core synthesis primitives.
 void registerBuiltinModules(std::vector<ModuleManifest>& out);
+
+/// Implemented in ModulesFx.cpp - the production effects and models that make
+/// generated instruments sound finished rather than merely correct.
+void registerProductionModules(std::vector<ModuleManifest>& out);
 
 } // namespace forge

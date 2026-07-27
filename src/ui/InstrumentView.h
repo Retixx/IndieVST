@@ -57,6 +57,10 @@ private:
     GraphView                      graphView_;
     juce::Label                    emptyLabel_;
 
+    // Scaled by layoutPanels() so the painted chrome matches the laid-out cells.
+    int panelTitleH_ = 17;
+    int panelPadX_   = 9;
+
     friend class Canvas;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(InstrumentView)
