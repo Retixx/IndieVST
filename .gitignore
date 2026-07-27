@@ -1,0 +1,75 @@
+# ---- Secrets ----
+.env
+.env.local
+*.key
+config.local.json
+
+# ---- Build output ----
+build/
+build-*/
+out/
+cmake-build-*/
+_deps/
+install/
+
+# ---- CMake ----
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+Testing/
+
+# ---- MSVC / Visual Studio ----
+.vs/
+*.vcxproj
+*.vcxproj.*
+*.sln
+*.suo
+*.user
+*.aps
+*.pch
+*.pdb
+*.ilk
+*.idb
+*.obj
+*.exp
+*.lib
+*.tlog
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+x64/
+
+# ---- Plugin binaries ----
+*.vst3
+*.dll
+*.so
+*.dylib
+*.component
+*.exe
+
+# ---- JUCE ----
+JuceLibraryCode/
+Builds/
+*.jucer.bak
+
+# ---- IDE ----
+.idea/
+.vscode/
+!.vscode/settings.json.example
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Local artifacts ----
+/logs/
+/tmp/
+*.log
+forge-crash-*.txt
+
+# ---- Generated instruments captured during dev ----
+/dev-instruments/

@@ -1,0 +1,305 @@
+{
+  "ir_version": "0.1",
+  "name": "Porcelain Pluck",
+  "description": "Bright FM pluck with a fast timbral decay and a tempo-synced delay.",
+  "voicing": "poly",
+  "polyphony": 16,
+  "nodes": [
+    {
+      "id": "osc_fm",
+      "type": "osc.fm2",
+      "scope": "voice",
+      "settings": {
+        "ratio": 3.0
+      }
+    },
+    {
+      "id": "filt",
+      "type": "filter.svf",
+      "scope": "voice",
+      "settings": {
+        "mode": "lp",
+        "slope": "12"
+      }
+    },
+    {
+      "id": "amp",
+      "type": "vca",
+      "scope": "voice"
+    },
+    {
+      "id": "env_amp",
+      "type": "env.adsr",
+      "scope": "voice"
+    },
+    {
+      "id": "env_idx",
+      "type": "env.adsr",
+      "scope": "voice"
+    },
+    {
+      "id": "vel",
+      "type": "mod.velocity",
+      "scope": "voice"
+    },
+    {
+      "id": "dly",
+      "type": "fx.delay",
+      "scope": "global",
+      "settings": {
+        "sync": true,
+        "division": "1/8",
+        "pingpong": true
+      }
+    },
+    {
+      "id": "verb",
+      "type": "fx.reverb",
+      "scope": "global"
+    },
+    {
+      "id": "master",
+      "type": "out.master",
+      "scope": "global"
+    }
+  ],
+  "audio": [
+    {
+      "from": "osc_fm",
+      "to": "filt",
+      "gain": 1.0
+    },
+    {
+      "from": "filt",
+      "to": "amp",
+      "gain": 1.0
+    },
+    {
+      "from": "amp",
+      "to": "dly",
+      "gain": 1.0
+    },
+    {
+      "from": "dly",
+      "to": "verb",
+      "gain": 1.0
+    },
+    {
+      "from": "verb",
+      "to": "master",
+      "gain": 1.0
+    }
+  ],
+  "mod": [
+    {
+      "source": "env_amp",
+      "target": "amp.gain",
+      "depth": 1.0
+    },
+    {
+      "source": "env_idx",
+      "target": "osc_fm.index",
+      "depth": 0.75,
+      "curve": "exp"
+    },
+    {
+      "source": "vel",
+      "target": "filt.cutoff",
+      "depth": 0.25
+    }
+  ],
+  "params": [
+    {
+      "id": "brightness",
+      "label": "Bright",
+      "min": 0,
+      "max": 12,
+      "default": 4.5,
+      "taper": "exp",
+      "group": "Tone",
+      "bind": [
+        {
+          "node": "osc_fm",
+          "param": "index"
+        }
+      ]
+    },
+    {
+      "id": "fm_fall",
+      "label": "Fall",
+      "unit": "ms",
+      "min": 5,
+      "max": 2000,
+      "default": 120,
+      "taper": "log",
+      "group": "Tone",
+      "bind": [
+        {
+          "node": "env_idx",
+          "param": "decay_ms"
+        }
+      ]
+    },
+    {
+      "id": "cutoff",
+      "label": "Cutoff",
+      "unit": "Hz",
+      "min": 200,
+      "max": 18000,
+      "default": 7000,
+      "taper": "log",
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "filt",
+          "param": "cutoff"
+        }
+      ]
+    },
+    {
+      "id": "reso",
+      "label": "Reso",
+      "min": 0,
+      "max": 0.8,
+      "default": 0.1,
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "filt",
+          "param": "resonance"
+        }
+      ]
+    },
+    {
+      "id": "amp_decay",
+      "label": "Decay",
+      "unit": "ms",
+      "min": 20,
+      "max": 4000,
+      "default": 420,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "decay_ms"
+        }
+      ]
+    },
+    {
+      "id": "amp_release",
+      "label": "Release",
+      "unit": "ms",
+      "min": 10,
+      "max": 4000,
+      "default": 300,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "release_ms"
+        }
+      ]
+    },
+    {
+      "id": "delay_mix",
+      "label": "Delay",
+      "min": 0,
+      "max": 1,
+      "default": 0.24,
+      "group": "Space",
+      "bind": [
+        {
+          "node": "dly",
+          "param": "mix"
+        }
+      ]
+    },
+    {
+      "id": "delay_fb",
+      "label": "Repeats",
+      "min": 0,
+      "max": 0.85,
+      "default": 0.4,
+      "group": "Space",
+      "bind": [
+        {
+          "node": "dly",
+          "param": "feedback"
+        }
+      ]
+    },
+    {
+      "id": "reverb_mix",
+      "label": "Reverb",
+      "min": 0,
+      "max": 1,
+      "default": 0.2,
+      "group": "Space",
+      "bind": [
+        {
+          "node": "verb",
+          "param": "mix"
+        }
+      ]
+    }
+  ],
+  "macros": [
+    {
+      "id": "sparkle",
+      "label": "Sparkle",
+      "default": 0.4,
+      "routes": [
+        {
+          "param": "brightness",
+          "depth": 0.5
+        },
+        {
+          "param": "cutoff",
+          "depth": 0.3
+        }
+      ]
+    }
+  ],
+  "ui": {
+    "theme": {
+      "accent": "#39C6A0",
+      "mood": "bright"
+    },
+    "sections": [
+      {
+        "title": "Tone",
+        "params": [
+          "brightness",
+          "fm_fall"
+        ]
+      },
+      {
+        "title": "Filter",
+        "params": [
+          "cutoff",
+          "reso"
+        ]
+      },
+      {
+        "title": "Amp",
+        "params": [
+          "amp_decay",
+          "amp_release"
+        ]
+      },
+      {
+        "title": "Space",
+        "params": [
+          "delay_mix",
+          "delay_fb",
+          "reverb_mix"
+        ]
+      }
+    ],
+    "macro_row": [
+      "sparkle"
+    ]
+  }
+}

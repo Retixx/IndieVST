@@ -1,0 +1,364 @@
+{
+  "ir_version": "0.1",
+  "name": "Glass Drift",
+  "description": "Wide evolving pad. Heavily detuned saw stack with a square underneath, a slow filter drift, chorus and a long reverb.",
+  "voicing": "poly",
+  "glide_ms": 0,
+  "polyphony": 16,
+  "assets": [],
+  "nodes": [
+    {
+      "id": "osc_a",
+      "type": "osc.analog",
+      "scope": "voice",
+      "settings": {
+        "wave": "saw",
+        "unison": 5,
+        "retrigger": false
+      }
+    },
+    {
+      "id": "osc_b",
+      "type": "osc.analog",
+      "scope": "voice",
+      "settings": {
+        "wave": "square",
+        "unison": 3,
+        "octave": -1,
+        "retrigger": false
+      }
+    },
+    {
+      "id": "filt",
+      "type": "filter.svf",
+      "scope": "voice",
+      "settings": {
+        "mode": "lp",
+        "slope": "24"
+      }
+    },
+    {
+      "id": "amp",
+      "type": "vca",
+      "scope": "voice"
+    },
+    {
+      "id": "env_amp",
+      "type": "env.adsr",
+      "scope": "voice"
+    },
+    {
+      "id": "lfo_drift",
+      "type": "lfo",
+      "scope": "global",
+      "settings": {
+        "wave": "sine",
+        "bipolar": true
+      }
+    },
+    {
+      "id": "chorus",
+      "type": "fx.chorus",
+      "scope": "global"
+    },
+    {
+      "id": "verb",
+      "type": "fx.reverb",
+      "scope": "global"
+    },
+    {
+      "id": "master",
+      "type": "out.master",
+      "scope": "global"
+    }
+  ],
+  "audio": [
+    {
+      "from": "osc_a",
+      "to": "filt",
+      "gain": 0.8
+    },
+    {
+      "from": "osc_b",
+      "to": "filt",
+      "gain": 0.6
+    },
+    {
+      "from": "filt",
+      "to": "amp",
+      "gain": 1.0
+    },
+    {
+      "from": "amp",
+      "to": "chorus",
+      "gain": 1.0
+    },
+    {
+      "from": "chorus",
+      "to": "verb",
+      "gain": 1.0
+    },
+    {
+      "from": "verb",
+      "to": "master",
+      "gain": 1.0
+    }
+  ],
+  "mod": [
+    {
+      "source": "env_amp",
+      "target": "amp.gain",
+      "depth": 1.0
+    },
+    {
+      "source": "lfo_drift",
+      "target": "filt.cutoff",
+      "depth": 0.18
+    }
+  ],
+  "params": [
+    {
+      "id": "cutoff",
+      "label": "Cutoff",
+      "unit": "Hz",
+      "min": 100,
+      "max": 16000,
+      "default": 2400,
+      "taper": "log",
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "filt",
+          "param": "cutoff"
+        }
+      ]
+    },
+    {
+      "id": "reso",
+      "label": "Reso",
+      "min": 0,
+      "max": 0.7,
+      "default": 0.12,
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "filt",
+          "param": "resonance"
+        }
+      ]
+    },
+    {
+      "id": "detune",
+      "label": "Detune",
+      "unit": "cents",
+      "min": 0,
+      "max": 45,
+      "default": 18,
+      "group": "Oscillators",
+      "bind": [
+        {
+          "node": "osc_a",
+          "param": "detune_cents"
+        },
+        {
+          "node": "osc_b",
+          "param": "detune_cents",
+          "scale": 0.6
+        }
+      ]
+    },
+    {
+      "id": "sub_level",
+      "label": "Body",
+      "min": 0,
+      "max": 1,
+      "default": 0.45,
+      "group": "Oscillators",
+      "bind": [
+        {
+          "node": "osc_b",
+          "param": "level"
+        }
+      ]
+    },
+    {
+      "id": "drift_rate",
+      "label": "Drift",
+      "unit": "Hz",
+      "min": 0.02,
+      "max": 2,
+      "default": 0.12,
+      "taper": "log",
+      "group": "Motion",
+      "bind": [
+        {
+          "node": "lfo_drift",
+          "param": "rate_hz"
+        }
+      ]
+    },
+    {
+      "id": "chorus_mix",
+      "label": "Chorus",
+      "min": 0,
+      "max": 1,
+      "default": 0.45,
+      "group": "Space",
+      "bind": [
+        {
+          "node": "chorus",
+          "param": "mix"
+        }
+      ]
+    },
+    {
+      "id": "reverb_mix",
+      "label": "Reverb",
+      "min": 0,
+      "max": 1,
+      "default": 0.42,
+      "group": "Space",
+      "bind": [
+        {
+          "node": "verb",
+          "param": "mix"
+        }
+      ]
+    },
+    {
+      "id": "reverb_size",
+      "label": "Size",
+      "min": 0,
+      "max": 1,
+      "default": 0.82,
+      "group": "Space",
+      "bind": [
+        {
+          "node": "verb",
+          "param": "size"
+        }
+      ]
+    },
+    {
+      "id": "amp_attack",
+      "label": "Attack",
+      "unit": "ms",
+      "min": 1,
+      "max": 8000,
+      "default": 900,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "attack_ms"
+        }
+      ]
+    },
+    {
+      "id": "amp_release",
+      "label": "Release",
+      "unit": "ms",
+      "min": 10,
+      "max": 12000,
+      "default": 2200,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "release_ms"
+        }
+      ]
+    },
+    {
+      "id": "amp_sustain",
+      "label": "Sustain",
+      "min": 0,
+      "max": 1,
+      "default": 0.85,
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "sustain"
+        }
+      ]
+    }
+  ],
+  "macros": [
+    {
+      "id": "air",
+      "label": "Air",
+      "default": 0.4,
+      "routes": [
+        {
+          "param": "cutoff",
+          "depth": 0.4
+        },
+        {
+          "param": "reverb_mix",
+          "depth": 0.25
+        }
+      ]
+    },
+    {
+      "id": "motion",
+      "label": "Motion",
+      "default": 0.3,
+      "routes": [
+        {
+          "param": "drift_rate",
+          "depth": 0.5
+        },
+        {
+          "param": "chorus_mix",
+          "depth": 0.3
+        }
+      ]
+    }
+  ],
+  "ui": {
+    "theme": {
+      "accent": "#6C8AE4",
+      "mood": "cold"
+    },
+    "sections": [
+      {
+        "title": "Oscillators",
+        "params": [
+          "detune",
+          "sub_level"
+        ]
+      },
+      {
+        "title": "Filter",
+        "params": [
+          "cutoff",
+          "reso"
+        ]
+      },
+      {
+        "title": "Amp",
+        "params": [
+          "amp_attack",
+          "amp_sustain",
+          "amp_release"
+        ]
+      },
+      {
+        "title": "Space",
+        "params": [
+          "chorus_mix",
+          "reverb_mix",
+          "reverb_size",
+          "drift_rate"
+        ]
+      }
+    ],
+    "macro_row": [
+      "air",
+      "motion"
+    ]
+  }
+}

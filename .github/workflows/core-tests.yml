@@ -1,0 +1,43 @@
+name: core
+
+# The JUCE-free core builds in seconds and carries all the load-bearing logic:
+# the validator, the safety clamps and the graph engine. Running it on every
+# push means a regression in the trust boundary is caught before it can reach a
+# pair of monitors.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (core only, no JUCE)
+        run: cmake -B build -DFORGE_BUILD_PLUGIN=OFF -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run tests
+        run: ./build/forge_tests
+
+  sanitisers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure with ASan + UBSan
+        run: cmake -B build-asan -DFORGE_BUILD_PLUGIN=OFF -DFORGE_ASAN=ON -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build-asan --parallel
+
+      # The IR fuzzer is the reason this job exists.
+      - name: Run tests under sanitisers
+        run: ./build-asan/forge_tests
+        env:
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1

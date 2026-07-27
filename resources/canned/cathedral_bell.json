@@ -1,0 +1,266 @@
+{
+  "ir_version": "0.1",
+  "name": "Cathedral Bell",
+  "description": "Inharmonic FM bell with a long generated decay shape and a large reverb.",
+  "voicing": "poly",
+  "polyphony": 12,
+  "assets": [
+    {
+      "id": "bell_decay",
+      "kind": "envelope",
+      "spec": {
+        "method": "stages",
+        "stages": [
+          {
+            "level": 1.0,
+            "time_ms": 2,
+            "curve": "linear"
+          },
+          {
+            "level": 0.42,
+            "time_ms": 260,
+            "curve": "exp"
+          },
+          {
+            "level": 0.18,
+            "time_ms": 1400,
+            "curve": "exp"
+          },
+          {
+            "level": 0.0,
+            "time_ms": 3200,
+            "curve": "exp"
+          }
+        ]
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "osc_fm",
+      "type": "osc.fm2",
+      "scope": "voice",
+      "settings": {
+        "ratio": 3.5
+      }
+    },
+    {
+      "id": "osc_hi",
+      "type": "osc.fm2",
+      "scope": "voice",
+      "settings": {
+        "ratio": 7.1,
+        "octave": 1
+      }
+    },
+    {
+      "id": "amp",
+      "type": "vca",
+      "scope": "voice"
+    },
+    {
+      "id": "env_bell",
+      "type": "env.multi",
+      "scope": "voice",
+      "settings": {
+        "shape": "bell_decay"
+      }
+    },
+    {
+      "id": "env_idx",
+      "type": "env.adsr",
+      "scope": "voice"
+    },
+    {
+      "id": "verb",
+      "type": "fx.reverb",
+      "scope": "global"
+    },
+    {
+      "id": "master",
+      "type": "out.master",
+      "scope": "global"
+    }
+  ],
+  "audio": [
+    {
+      "from": "osc_fm",
+      "to": "amp",
+      "gain": 1.0
+    },
+    {
+      "from": "osc_hi",
+      "to": "amp",
+      "gain": 0.35
+    },
+    {
+      "from": "amp",
+      "to": "verb",
+      "gain": 1.0
+    },
+    {
+      "from": "verb",
+      "to": "master",
+      "gain": 1.0
+    }
+  ],
+  "mod": [
+    {
+      "source": "env_bell",
+      "target": "amp.gain",
+      "depth": 1.0
+    },
+    {
+      "source": "env_idx",
+      "target": "osc_fm.index",
+      "depth": 0.6,
+      "curve": "exp"
+    },
+    {
+      "source": "env_idx",
+      "target": "osc_hi.index",
+      "depth": 0.8,
+      "curve": "exp"
+    }
+  ],
+  "params": [
+    {
+      "id": "strike",
+      "label": "Strike",
+      "min": 0,
+      "max": 12,
+      "default": 6,
+      "taper": "exp",
+      "group": "Tone",
+      "bind": [
+        {
+          "node": "osc_fm",
+          "param": "index"
+        }
+      ]
+    },
+    {
+      "id": "shimmer",
+      "label": "Shimmer",
+      "min": 0,
+      "max": 1,
+      "default": 0.35,
+      "group": "Tone",
+      "bind": [
+        {
+          "node": "osc_hi",
+          "param": "level"
+        }
+      ]
+    },
+    {
+      "id": "strike_fall",
+      "label": "Fall",
+      "unit": "ms",
+      "min": 10,
+      "max": 3000,
+      "default": 300,
+      "taper": "log",
+      "group": "Tone",
+      "bind": [
+        {
+          "node": "env_idx",
+          "param": "decay_ms"
+        }
+      ]
+    },
+    {
+      "id": "decay",
+      "label": "Decay",
+      "unit": "x",
+      "min": 0.2,
+      "max": 4,
+      "default": 1,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_bell",
+          "param": "time_scale"
+        }
+      ]
+    },
+    {
+      "id": "reverb_mix",
+      "label": "Reverb",
+      "min": 0,
+      "max": 1,
+      "default": 0.4,
+      "group": "Space",
+      "bind": [
+        {
+          "node": "verb",
+          "param": "mix"
+        }
+      ]
+    },
+    {
+      "id": "reverb_size",
+      "label": "Size",
+      "min": 0,
+      "max": 1,
+      "default": 0.9,
+      "group": "Space",
+      "bind": [
+        {
+          "node": "verb",
+          "param": "size"
+        }
+      ]
+    }
+  ],
+  "macros": [
+    {
+      "id": "distance",
+      "label": "Distance",
+      "default": 0.35,
+      "routes": [
+        {
+          "param": "reverb_mix",
+          "depth": 0.5
+        },
+        {
+          "param": "strike",
+          "depth": -0.3
+        }
+      ]
+    }
+  ],
+  "ui": {
+    "theme": {
+      "accent": "#C9A227",
+      "mood": "metallic"
+    },
+    "sections": [
+      {
+        "title": "Tone",
+        "params": [
+          "strike",
+          "shimmer",
+          "strike_fall"
+        ]
+      },
+      {
+        "title": "Amp",
+        "params": [
+          "decay"
+        ]
+      },
+      {
+        "title": "Space",
+        "params": [
+          "reverb_mix",
+          "reverb_size"
+        ]
+      }
+    ],
+    "macro_row": [
+      "distance"
+    ]
+  }
+}

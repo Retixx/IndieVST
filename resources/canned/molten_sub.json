@@ -1,0 +1,359 @@
+{
+  "ir_version": "0.1",
+  "name": "Molten Sub",
+  "description": "Warm analog bass. Detuned saw over a sine sub, through a saturating ladder filter with a slow envelope sweep and output drive.",
+  "voicing": "mono",
+  "glide_ms": 40,
+  "polyphony": 1,
+  "assets": [],
+  "nodes": [
+    {
+      "id": "osc_saw",
+      "type": "osc.analog",
+      "scope": "voice",
+      "settings": {
+        "wave": "saw",
+        "unison": 2,
+        "octave": -1
+      }
+    },
+    {
+      "id": "osc_sub",
+      "type": "osc.analog",
+      "scope": "voice",
+      "settings": {
+        "wave": "sine",
+        "octave": -2
+      }
+    },
+    {
+      "id": "filt",
+      "type": "filter.ladder",
+      "scope": "voice"
+    },
+    {
+      "id": "amp",
+      "type": "vca",
+      "scope": "voice"
+    },
+    {
+      "id": "env_amp",
+      "type": "env.adsr",
+      "scope": "voice"
+    },
+    {
+      "id": "env_filt",
+      "type": "env.adsr",
+      "scope": "voice"
+    },
+    {
+      "id": "env_amt",
+      "type": "util.math",
+      "scope": "voice",
+      "settings": {
+        "op": "mul"
+      }
+    },
+    {
+      "id": "drive",
+      "type": "fx.drive",
+      "scope": "global"
+    },
+    {
+      "id": "master",
+      "type": "out.master",
+      "scope": "global"
+    }
+  ],
+  "audio": [
+    {
+      "from": "osc_saw",
+      "to": "filt",
+      "gain": 1.0
+    },
+    {
+      "from": "osc_sub",
+      "to": "filt",
+      "gain": 1.0
+    },
+    {
+      "from": "filt",
+      "to": "amp",
+      "gain": 1.0
+    },
+    {
+      "from": "amp",
+      "to": "drive",
+      "gain": 1.0
+    },
+    {
+      "from": "drive",
+      "to": "master",
+      "gain": 1.0
+    }
+  ],
+  "mod": [
+    {
+      "source": "env_amp",
+      "target": "amp.gain",
+      "depth": 1.0
+    },
+    {
+      "source": "env_filt",
+      "target": "env_amt.a",
+      "depth": 1.0
+    },
+    {
+      "source": "env_amt",
+      "target": "filt.cutoff",
+      "depth": 1.0,
+      "curve": "exp"
+    }
+  ],
+  "params": [
+    {
+      "id": "saw_level",
+      "label": "Saw",
+      "min": 0,
+      "max": 1,
+      "default": 0.7,
+      "group": "Oscillators",
+      "bind": [
+        {
+          "node": "osc_saw",
+          "param": "level"
+        }
+      ]
+    },
+    {
+      "id": "sub_level",
+      "label": "Sub",
+      "min": 0,
+      "max": 1,
+      "default": 0.75,
+      "group": "Oscillators",
+      "bind": [
+        {
+          "node": "osc_sub",
+          "param": "level"
+        }
+      ]
+    },
+    {
+      "id": "detune",
+      "label": "Detune",
+      "unit": "cents",
+      "min": 0,
+      "max": 30,
+      "default": 6,
+      "group": "Oscillators",
+      "bind": [
+        {
+          "node": "osc_saw",
+          "param": "detune_cents"
+        }
+      ]
+    },
+    {
+      "id": "cutoff",
+      "label": "Cutoff",
+      "unit": "Hz",
+      "min": 40,
+      "max": 12000,
+      "default": 420,
+      "taper": "log",
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "filt",
+          "param": "cutoff"
+        }
+      ]
+    },
+    {
+      "id": "reso",
+      "label": "Reso",
+      "min": 0,
+      "max": 0.9,
+      "default": 0.22,
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "filt",
+          "param": "resonance"
+        }
+      ]
+    },
+    {
+      "id": "filter_env",
+      "label": "Env Amt",
+      "min": 0,
+      "max": 1,
+      "default": 0.55,
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "env_amt",
+          "param": "b"
+        }
+      ]
+    },
+    {
+      "id": "sweep",
+      "label": "Sweep",
+      "unit": "ms",
+      "min": 20,
+      "max": 4000,
+      "default": 700,
+      "taper": "log",
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "env_filt",
+          "param": "decay_ms"
+        }
+      ]
+    },
+    {
+      "id": "drive_amt",
+      "label": "Drive",
+      "min": 1,
+      "max": 12,
+      "default": 2.4,
+      "taper": "log",
+      "group": "Output",
+      "bind": [
+        {
+          "node": "drive",
+          "param": "drive"
+        }
+      ]
+    },
+    {
+      "id": "amp_attack",
+      "label": "Attack",
+      "unit": "ms",
+      "min": 0.5,
+      "max": 2000,
+      "default": 3,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "attack_ms"
+        }
+      ]
+    },
+    {
+      "id": "amp_decay",
+      "label": "Decay",
+      "unit": "ms",
+      "min": 10,
+      "max": 4000,
+      "default": 600,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "decay_ms"
+        }
+      ]
+    },
+    {
+      "id": "amp_sustain",
+      "label": "Sustain",
+      "min": 0,
+      "max": 1,
+      "default": 0.55,
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "sustain"
+        }
+      ]
+    },
+    {
+      "id": "amp_release",
+      "label": "Release",
+      "unit": "ms",
+      "min": 10,
+      "max": 4000,
+      "default": 250,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "release_ms"
+        }
+      ]
+    }
+  ],
+  "macros": [
+    {
+      "id": "warmth",
+      "label": "Warmth",
+      "default": 0.35,
+      "routes": [
+        {
+          "param": "cutoff",
+          "depth": -0.35
+        },
+        {
+          "param": "drive_amt",
+          "depth": 0.5
+        },
+        {
+          "param": "reso",
+          "depth": 0.15
+        }
+      ]
+    }
+  ],
+  "ui": {
+    "theme": {
+      "accent": "#E4572E",
+      "mood": "warm"
+    },
+    "sections": [
+      {
+        "title": "Oscillators",
+        "params": [
+          "saw_level",
+          "sub_level",
+          "detune"
+        ]
+      },
+      {
+        "title": "Filter",
+        "params": [
+          "cutoff",
+          "reso",
+          "filter_env",
+          "sweep"
+        ]
+      },
+      {
+        "title": "Amp",
+        "params": [
+          "amp_attack",
+          "amp_decay",
+          "amp_sustain",
+          "amp_release"
+        ]
+      },
+      {
+        "title": "Output",
+        "params": [
+          "drive_amt"
+        ]
+      }
+    ],
+    "macro_row": [
+      "warmth"
+    ]
+  }
+}

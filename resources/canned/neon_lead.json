@@ -1,0 +1,363 @@
+{
+  "ir_version": "0.1",
+  "name": "Neon Lead",
+  "description": "Cutting mono lead. Detuned saws into a ladder filter, glide between notes, vibrato on the mod wheel, drive and a slap delay.",
+  "voicing": "legato",
+  "glide_ms": 60,
+  "polyphony": 1,
+  "nodes": [
+    {
+      "id": "osc_saw",
+      "type": "osc.analog",
+      "scope": "voice",
+      "settings": {
+        "wave": "saw",
+        "unison": 3
+      }
+    },
+    {
+      "id": "osc_pls",
+      "type": "osc.analog",
+      "scope": "voice",
+      "settings": {
+        "wave": "pulse",
+        "octave": -1
+      }
+    },
+    {
+      "id": "filt",
+      "type": "filter.ladder",
+      "scope": "voice"
+    },
+    {
+      "id": "amp",
+      "type": "vca",
+      "scope": "voice"
+    },
+    {
+      "id": "env_amp",
+      "type": "env.adsr",
+      "scope": "voice"
+    },
+    {
+      "id": "lfo_vib",
+      "type": "lfo",
+      "scope": "voice",
+      "settings": {
+        "wave": "sine",
+        "bipolar": true,
+        "retrigger": true
+      }
+    },
+    {
+      "id": "wheel",
+      "type": "mod.modwheel",
+      "scope": "voice"
+    },
+    {
+      "id": "vib_amt",
+      "type": "util.math",
+      "scope": "voice",
+      "settings": {
+        "op": "mul"
+      }
+    },
+    {
+      "id": "drive",
+      "type": "fx.drive",
+      "scope": "global"
+    },
+    {
+      "id": "dly",
+      "type": "fx.delay",
+      "scope": "global",
+      "settings": {
+        "sync": true,
+        "division": "1/8D"
+      }
+    },
+    {
+      "id": "master",
+      "type": "out.master",
+      "scope": "global"
+    }
+  ],
+  "audio": [
+    {
+      "from": "osc_saw",
+      "to": "filt",
+      "gain": 1.0
+    },
+    {
+      "from": "osc_pls",
+      "to": "filt",
+      "gain": 0.5
+    },
+    {
+      "from": "filt",
+      "to": "amp",
+      "gain": 1.0
+    },
+    {
+      "from": "amp",
+      "to": "drive",
+      "gain": 1.0
+    },
+    {
+      "from": "drive",
+      "to": "dly",
+      "gain": 1.0
+    },
+    {
+      "from": "dly",
+      "to": "master",
+      "gain": 1.0
+    }
+  ],
+  "mod": [
+    {
+      "source": "env_amp",
+      "target": "amp.gain",
+      "depth": 1.0
+    },
+    {
+      "source": "lfo_vib",
+      "target": "vib_amt.a",
+      "depth": 1.0
+    },
+    {
+      "source": "wheel",
+      "target": "vib_amt.b",
+      "depth": 1.0
+    },
+    {
+      "source": "vib_amt",
+      "target": "osc_saw.pitch_mod_semis",
+      "depth": 0.02
+    },
+    {
+      "source": "vib_amt",
+      "target": "osc_pls.pitch_mod_semis",
+      "depth": 0.02
+    }
+  ],
+  "params": [
+    {
+      "id": "cutoff",
+      "label": "Cutoff",
+      "unit": "Hz",
+      "min": 100,
+      "max": 16000,
+      "default": 3200,
+      "taper": "log",
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "filt",
+          "param": "cutoff"
+        }
+      ]
+    },
+    {
+      "id": "reso",
+      "label": "Reso",
+      "min": 0,
+      "max": 0.9,
+      "default": 0.35,
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "filt",
+          "param": "resonance"
+        }
+      ]
+    },
+    {
+      "id": "keytrack",
+      "label": "Track",
+      "min": 0,
+      "max": 1,
+      "default": 0.4,
+      "group": "Filter",
+      "bind": [
+        {
+          "node": "filt",
+          "param": "keytrack"
+        }
+      ]
+    },
+    {
+      "id": "detune",
+      "label": "Detune",
+      "unit": "cents",
+      "min": 0,
+      "max": 30,
+      "default": 11,
+      "group": "Oscillators",
+      "bind": [
+        {
+          "node": "osc_saw",
+          "param": "detune_cents"
+        }
+      ]
+    },
+    {
+      "id": "pulse_level",
+      "label": "Pulse",
+      "min": 0,
+      "max": 1,
+      "default": 0.4,
+      "group": "Oscillators",
+      "bind": [
+        {
+          "node": "osc_pls",
+          "param": "level"
+        }
+      ]
+    },
+    {
+      "id": "vib_rate",
+      "label": "Vib Rate",
+      "unit": "Hz",
+      "min": 0.5,
+      "max": 12,
+      "default": 5.2,
+      "taper": "log",
+      "group": "Motion",
+      "bind": [
+        {
+          "node": "lfo_vib",
+          "param": "rate_hz"
+        }
+      ]
+    },
+    {
+      "id": "drive_amt",
+      "label": "Drive",
+      "min": 1,
+      "max": 16,
+      "default": 3.2,
+      "taper": "log",
+      "group": "Output",
+      "bind": [
+        {
+          "node": "drive",
+          "param": "drive"
+        }
+      ]
+    },
+    {
+      "id": "delay_mix",
+      "label": "Delay",
+      "min": 0,
+      "max": 1,
+      "default": 0.22,
+      "group": "Space",
+      "bind": [
+        {
+          "node": "dly",
+          "param": "mix"
+        }
+      ]
+    },
+    {
+      "id": "amp_attack",
+      "label": "Attack",
+      "unit": "ms",
+      "min": 0.5,
+      "max": 1000,
+      "default": 8,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "attack_ms"
+        }
+      ]
+    },
+    {
+      "id": "amp_release",
+      "label": "Release",
+      "unit": "ms",
+      "min": 10,
+      "max": 3000,
+      "default": 260,
+      "taper": "log",
+      "group": "Amp",
+      "bind": [
+        {
+          "node": "env_amp",
+          "param": "release_ms"
+        }
+      ]
+    }
+  ],
+  "macros": [
+    {
+      "id": "push",
+      "label": "Push",
+      "default": 0.3,
+      "routes": [
+        {
+          "param": "drive_amt",
+          "depth": 0.6
+        },
+        {
+          "param": "cutoff",
+          "depth": 0.25
+        },
+        {
+          "param": "reso",
+          "depth": 0.2
+        }
+      ]
+    }
+  ],
+  "ui": {
+    "theme": {
+      "accent": "#F03E7A",
+      "mood": "aggressive"
+    },
+    "sections": [
+      {
+        "title": "Oscillators",
+        "params": [
+          "detune",
+          "pulse_level"
+        ]
+      },
+      {
+        "title": "Filter",
+        "params": [
+          "cutoff",
+          "reso",
+          "keytrack"
+        ]
+      },
+      {
+        "title": "Amp",
+        "params": [
+          "amp_attack",
+          "amp_release"
+        ]
+      },
+      {
+        "title": "Motion",
+        "params": [
+          "vib_rate"
+        ]
+      },
+      {
+        "title": "Output",
+        "params": [
+          "drive_amt",
+          "delay_mix"
+        ]
+      }
+    ],
+    "macro_row": [
+      "push"
+    ]
+  }
+}
