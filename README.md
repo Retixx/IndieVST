@@ -64,11 +64,41 @@ cmake --build build --config Release
 
 No Administrator shell required. The build installs to the **per-user** VST3 folder,
 `%LOCALAPPDATA%\Programs\Common\VST3`, so you never have to run a compiler elevated.
-Add that folder to your DAW's plugin search paths once:
 
-- **FL Studio** — Options → Manage plugins → Plugin search paths → Add
-- **Ableton Live** — Preferences → Plug-Ins → VST3 Custom Folder
-- **Reaper** — Options → Preferences → Plug-ins → VST → Add
+### Using it in FL Studio
+
+1. **Options → Manage plugins**
+2. Under *Plugin search paths*, **Add** `%LOCALAPPDATA%\Programs\Common\VST3`
+   (paste the expanded path, e.g. `C:\Users\maxim\AppData\Local\Programs\Common\VST3`)
+3. Tick **Verify plugins** and click **Find installed plugins**
+4. **IndieVST** appears under *Generators* — it is an instrument, not an effect.
+   (If you see a plugin called *Forge*, that is a stale build from before the
+   rename. Delete it, or FL will keep loading the old one.)
+5. Drop it on a channel in the Channel Rack and play it from the piano roll
+
+If you would rather not add a search path, copy the bundle into the folder FL
+already scans, from an **elevated** PowerShell:
+
+```powershell
+Copy-Item -Recurse -Force "$env:LOCALAPPDATA\Programs\Common\VST3\IndieVST.vst3" "C:\Program Files\Common Files\VST3\"
+```
+
+IndieVST is a normal VST3 instrument: MIDI in, stereo out, no input bus, so the
+piano roll, mixer routing, inserts on other plugins and rendering to audio all
+behave the way FL expects. It reports an 8 second tail, so reverb and delay
+tails are not cut off when you render.
+
+**Automation note.** Because each generated instrument has different controls,
+IndieVST exposes a fixed pool of **16 macros + 224 parameter slots** and
+re-points them per instrument (SPEC §9.1). The pool is declared once at
+construction, before the host scans, so the automation list never changes shape
+underneath a saved project. FL reads slot names on demand, so *Browse
+parameters* shows the current instrument's names. Selector controls (wave shape,
+filter mode) rebuild the graph and are therefore **not** automatable — they are
+UI-only by design.
+
+Other hosts: **Ableton** — Preferences → Plug-Ins → VST3 Custom Folder.
+**Reaper** — Options → Preferences → Plug-ins → VST → Add.
 
 To install system-wide instead, configure from an elevated shell with
 `-DFORGE_VST3_COPY_DIR="C:/Program Files/Common Files/VST3"`.
@@ -77,8 +107,8 @@ A **Standalone** executable is produced alongside the VST3 — the fastest way t
 changes without loading a DAW:
 
 ```powershell
-cmake --build build --config Release --target Forge_Standalone
-.\build\Forge_artefacts\Release\Standalone\Forge.exe
+cmake --build build --config Release --target IndieVST_Standalone
+.\build\IndieVST_artefacts\Release\Standalone\IndieVST.exe
 ```
 
 ### Just the core and its tests (no JUCE, seconds to build)

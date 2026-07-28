@@ -179,6 +179,26 @@ public:
                   1.0f + alpha / A, -2.0f * std::cos(w), 1.0f - alpha / A);
     }
 
+    /// RBJ low pass. The cabinet needs a genuinely steep top end, and a
+    /// one-pole cannot get anywhere near it.
+    void setLowPass(float hz, float q, double sr) noexcept {
+        const float w = 6.28318530718f * clampT(hz, 20.0f, static_cast<float>(sr) * 0.45f)
+                      / static_cast<float>(sr);
+        const float cw = std::cos(w), sw = std::sin(w);
+        const float alpha = sw / (2.0f * clampT(q, 0.1f, 12.0f));
+        setCoeffs((1.0f - cw) * 0.5f, 1.0f - cw, (1.0f - cw) * 0.5f,
+                  1.0f + alpha, -2.0f * cw, 1.0f - alpha);
+    }
+
+    void setHighPass(float hz, float q, double sr) noexcept {
+        const float w = 6.28318530718f * clampT(hz, 20.0f, static_cast<float>(sr) * 0.45f)
+                      / static_cast<float>(sr);
+        const float cw = std::cos(w), sw = std::sin(w);
+        const float alpha = sw / (2.0f * clampT(q, 0.1f, 12.0f));
+        setCoeffs((1.0f + cw) * 0.5f, -(1.0f + cw), (1.0f + cw) * 0.5f,
+                  1.0f + alpha, -2.0f * cw, 1.0f - alpha);
+    }
+
     void setLowShelf(float hz, float gainDb, double sr) noexcept {
         const float A = std::pow(10.0f, gainDb / 40.0f);
         const float w = 6.28318530718f * clampT(hz, 20.0f, static_cast<float>(sr) * 0.45f)
@@ -214,6 +234,29 @@ public:
         x2_ = x1_; x1_ = x;
         y2_ = y1_; y1_ = clampT(sanitize(y), -64.0f, 64.0f);
         return y1_;
+    }
+
+    struct Coeffs { float b0, b1, b2, a1, a2; };
+    Coeffs coeffs() const noexcept { return {b0_, b1_, b2_, a1_, a2_}; }
+
+    /// Magnitude response in dB at `hz`. Exposed so a UI curve can be drawn
+    /// from the very same coefficients the audio thread is running - a
+    /// display that recomputes its own version of the maths eventually
+    /// disagrees with the sound, and then it is worse than no display.
+    static float magnitudeDb(const Coeffs& c, float hz, double sampleRate) noexcept {
+        const double w = 2.0 * 3.14159265358979 * clampT(static_cast<double>(hz), 1.0,
+                                                         sampleRate * 0.49) / sampleRate;
+        const double cw = std::cos(w), sw = std::sin(w);
+        const double cw2 = std::cos(2.0 * w), sw2 = std::sin(2.0 * w);
+
+        const double numRe = c.b0 + c.b1 * cw + c.b2 * cw2;
+        const double numIm =      - c.b1 * sw - c.b2 * sw2;
+        const double denRe = 1.0  + c.a1 * cw + c.a2 * cw2;
+        const double denIm =      - c.a1 * sw - c.a2 * sw2;
+
+        const double num = std::sqrt(numRe * numRe + numIm * numIm);
+        const double den = std::sqrt(denRe * denRe + denIm * denIm);
+        return static_cast<float>(20.0 * std::log10(std::max(num / std::max(den, 1e-12), 1e-9)));
     }
 
 private:

@@ -148,7 +148,7 @@ ForgeConfig ForgeConfig::load() {
         return s.isNotEmpty() ? static_cast<float>(s.getDoubleValue()) : fallback;
     };
 
-    cfg.timeoutMs    = juce::jlimit(5000,  180000, intOr("timeout_ms", "FORGE_GENERATION_TIMEOUT_MS", 60000));
+    cfg.timeoutMs    = juce::jlimit(5000,  600000, intOr("timeout_ms", "FORGE_GENERATION_TIMEOUT_MS", 150000));
 
     // Migration. Earlier builds wrote every field to config.json, including
     // tuning values the user was never shown and never chose. That meant a
@@ -156,11 +156,14 @@ ForgeConfig ForgeConfig::load() {
     // thinking - outlived the code change that fixed it, and every generation
     // aborted mid-flight while still being billed for the tokens.
     //
-    // A timeout below 30s in a v1 file can only have come from that
+    // The same trap caught the 60s value that replaced it: a 16k-token patch
+    // takes minutes on a large model, and the generation was being abandoned
+    // and quietly swapped for the offline fallback while the model was still
+    // writing. Anything short in an older file can only have come from an
     // auto-written default, so it is discarded rather than honoured.
     const int version = intOr("config_version", "FORGE_CONFIG_VERSION", 1);
-    if (version < kConfigVersion && cfg.timeoutMs < 30000)
-        cfg.timeoutMs = 60000;
+    if (version < kConfigVersion && cfg.timeoutMs < 120000)
+        cfg.timeoutMs = 150000;
     cfg.maxRetries   = juce::jlimit(0,     3,      intOr("max_retries", "FORGE_MAX_RETRIES", 1));
     cfg.temperature  = juce::jlimit(0.0f,  1.5f,   floatOr("temperature", "FORGE_TEMPERATURE", 0.7f));
     cfg.polyphony    = juce::jlimit(1,     32,     intOr("polyphony", "FORGE_POLYPHONY", 16));

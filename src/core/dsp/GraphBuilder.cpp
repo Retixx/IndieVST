@@ -37,6 +37,7 @@ void buildScopePlan(const ir::Instrument& inst, const std::vector<int>& order,
             plan.paramModBaseNorm.push_back(
                 p.hasModBase ? removeTaper(p.modBase, p.min, p.max, p.taper)
                              : removeTaper(p.def,     p.min, p.max, p.taper));
+            plan.paramMulMod.push_back(p.multiplicativeMod ? 1 : 0);
         }
         plan.totalParams += pn.numParams;
 
@@ -44,7 +45,8 @@ void buildScopePlan(const ir::Instrument& inst, const std::vector<int>& order,
         plan.nodes.push_back(std::move(pn));
     }
 
-    plan.baseNorm = plan.paramDefaultNorm;
+    plan.baseNorm     = plan.paramDefaultNorm;
+    plan.modAccumInit.assign(static_cast<size_t>(plan.totalParams), 0.0f);
 }
 
 } // namespace
@@ -185,9 +187,19 @@ std::unique_ptr<GraphInstance> GraphBuilder::build(const ir::Instrument& inst,
             for (const auto& b : binds)
                 if (b.dstGlobal == wantGlobal && b.dstFlatParam >= 0)
                     bound[static_cast<size_t>(b.dstFlatParam)] = 1;
-            for (size_t i = 0; i < modulated.size(); ++i)
-                if (modulated[i] && !bound[i])
+            for (size_t i = 0; i < modulated.size(); ++i) {
+                // Multiplication only applies where something is actually
+                // routed in; an unmodulated gain must stay at its knob value,
+                // not collapse to a product of nothing.
+                if (!modulated[i]) plan.paramMulMod[i] = 0;
+                plan.modAccumInit[i] = plan.paramMulMod[i] ? 1.0f : 0.0f;
+
+                // A parameter that SCALES needs no silent base: the product is
+                // already zero whenever the envelope is, and dropping the base
+                // to zero as well would multiply everything away.
+                if (modulated[i] && !bound[i] && !plan.paramMulMod[i])
                     plan.paramDefaultNorm[i] = plan.paramModBaseNorm[i];
+            }
             plan.baseNorm = plan.paramDefaultNorm;
         };
         applyModBases(graph->voicePlan_,  graph->modRoutes_, graph->binds_, false);
@@ -207,8 +219,11 @@ std::unique_ptr<GraphInstance> GraphBuilder::build(const ir::Instrument& inst,
         graph->exposedTaper_[i] = inst.params[i].taper;
     }
     graph->macroNorm_.resize(inst.macros.size());
-    for (size_t i = 0; i < inst.macros.size(); ++i)
-        graph->macroNorm_[i] = clamp01(inst.macros[i].def);
+    graph->macroDefaultNorm_.resize(inst.macros.size());
+    for (size_t i = 0; i < inst.macros.size(); ++i) {
+        graph->macroNorm_[i]        = clamp01(inst.macros[i].def);
+        graph->macroDefaultNorm_[i] = graph->macroNorm_[i];
+    }
 
     // --- macro routes, resolved to indices ---
     for (size_t m = 0; m < inst.macros.size(); ++m) {

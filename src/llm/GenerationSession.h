@@ -56,6 +56,7 @@ public:
                double sampleRate,
                const juce::String& prompt,
                const juce::String& currentIrJson,
+               const juce::String& referenceText,
                ProgressFn onProgress,
                CompleteFn onComplete);
 

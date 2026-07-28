@@ -6,6 +6,7 @@
 #include "plugin/ForgeConfig.h"
 #include "plugin/GraphPublisher.h"
 #include "plugin/InstrumentLibrary.h"
+#include "core/audio/ReferenceAnalysis.h"
 #include "plugin/ParameterPool.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -34,7 +35,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "Forge"; }
+    const juce::String getName() const override { return "IndieVST"; }
     bool   acceptsMidi()  const override { return true; }
     bool   producesMidi() const override { return false; }
     bool   isMidiEffect() const override { return false; }
@@ -65,11 +66,41 @@ public:
     /// `editCurrent` sends the loaded instrument along so the model modifies it
     /// rather than starting over.
     void generate(const juce::String& prompt, bool editCurrent);
+
+    // --- reference audio ---------------------------------------------------
+    //
+    // Optional. The musician drops in a recording; Forge measures it and hands
+    // the measurements to the model alongside the text. The audio itself is
+    // never stored in the instrument and never reaches the audio thread - this
+    // is analysis, not sampling, which matters legally as much as musically.
+
+    /// Decodes and analyses the file. Returns false and fills `error` if the
+    /// format is unsupported or the audio is unusable. Message thread.
+    bool loadReference(const juce::File&, juce::String& error);
+    void clearReference();
+    bool hasReference() const { return reference_.valid; }
+    const audio::ReferenceFeatures& reference() const { return reference_; }
+    juce::String referenceName() const { return referenceName_; }
     void cancelGeneration();
     bool isGenerating() const { return session_.isRunning(); }
 
     void loadInstrument(const juce::String& id);
     void startNewInstrument();
+
+    /// Loads the complete fixed architecture with its defaults - every
+    /// oscillator, filter, envelope, LFO and effect the engine has. Useful as
+    /// a starting point, and as the reference for what the model is filling in.
+    void loadFullArchitecture();
+
+    /// Changes a construction-time module setting (oscillator wave, filter
+    /// mode...) and rebuilds the graph. Message thread only; the swap is
+    /// covered by the publisher's crossfade so it is seamless.
+    void setNodeSetting(const juce::String& nodeId, const juce::String& setting,
+                        const nlohmann::json& value);
+
+    /// File extensions the decoder accepts, for the file chooser and the
+    /// drag-and-drop filter.
+    static juce::String referenceFileFilter();
 
     ParameterPool&     parameterPool()      { return pool_; }
     InstrumentLibrary& library()            { return library_; }
@@ -91,6 +122,10 @@ public:
     /// from "start something new" (the dropdown's Create New entry).
     void setShowingChat(bool shouldShowChat, bool editCurrent = false);
     bool chatEditsCurrent() const { return chatEditsCurrent_; }
+
+    /// The words the musician actually typed for the loaded instrument, so the
+    /// UI can show the request back alongside what was built from it.
+    juce::String promptForCurrent() const;
 
     /// Shared with the editor's on-screen keyboard. Notes played there are
     /// merged into the incoming MIDI stream, so the plugin is playable with no
@@ -124,6 +159,11 @@ private:
     juce::String         currentId_;
     std::vector<ChatTurn> chat_;
     juce::String         lastStatus_, lastRepairs_, lastLogPath_;
+
+    /// The measurements from the optional reference recording. Only the
+    /// measurements - the decoded audio is discarded as soon as it is analysed.
+    audio::ReferenceFeatures reference_;
+    juce::String             referenceName_;
     bool                 lastUsedFallback_ = false;
     bool                 showChat_ = true;
     bool                 chatEditsCurrent_ = false;

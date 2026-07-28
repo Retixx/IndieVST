@@ -198,13 +198,28 @@ ForgeEditor::ForgeEditor(ForgeAudioProcessor& owner)
     applyScreenState();
 
     setResizable(true, true);
-    // Lock the 7:3 proportions: resizing should scale the panel, not reshape it.
-    if (auto* bounds = getConstrainer()) {
-        bounds->setFixedAspectRatio(7.0 / 3.0);
-        bounds->setSizeLimits(770, 330, 1610, 690);
-    }
-    setSize(1050, 450);
+    applyAspectForScreen();
     startTimerHz(30);
+}
+
+/// ONE window shape, fixed at 7:3, for both screens.
+///
+/// The rack used to resize itself per tab so a sparse page would not swim in
+/// empty panel. It worked, and it was still wrong: the window jumping every
+/// time you touched a tab reads as instability, and in a DAW the plugin window
+/// changing size under the mouse is actively unpleasant. The rack now fits
+/// itself to the window instead of the other way round - which is what every
+/// shipping instrument plugin does.
+void ForgeEditor::applyAspectForScreen() {
+    auto* bounds = getConstrainer();
+    if (bounds == nullptr) return;
+
+    if (!aspectLocked_) {
+        bounds->setFixedAspectRatio(7.0 / 3.0);
+        bounds->setSizeLimits(770, 330, 1960, 840);
+        aspectLocked_ = true;
+        if (getWidth() <= 0) setSize(1050, 450);
+    }
 }
 
 ForgeEditor::~ForgeEditor() {
@@ -237,6 +252,11 @@ void ForgeEditor::forgeProgress(const juce::String& text) {
 }
 
 void ForgeEditor::applyScreenState() {
+    // Style travels with the instrument, so switching presets changes the
+    // whole look and not just the accent colour.
+    if (const auto* inst = processor_.currentInstrument())
+        lookAndFeel_.setStyle(ForgeLookAndFeel::styleFromString(inst->ui.style));
+
     const bool chat = processor_.showingChat() || processor_.currentInstrument() == nullptr;
     chatView_.setVisible(chat);
     instrumentView_.setVisible(!chat);
@@ -250,6 +270,7 @@ void ForgeEditor::applyScreenState() {
         instrumentBox_.setTooltip(juce::String(instrument->description));
     }
 
+    applyAspectForScreen();
     resized();
     if (chat) chatView_.focusPrompt();
     else      keyboard_.grabKeyboardFocus();
@@ -260,19 +281,73 @@ void ForgeEditor::refreshInstrumentMenu() {
     instrumentBox_.clear(juce::dontSendNotification);
     menuIds_.clear();
 
+    instrumentBox_.addItem("+ Create New Instrument", kCreateNewItemId);
+    instrumentBox_.addSeparator();
+
+    // Newest first, and capped: after a long session the library becomes an
+    // unscrollable wall of near-identical names. The rest stay on disk and are
+    // reachable through Menu -> Open instrument folder.
+    constexpr int kMaxListed = 40;
     bool sessionHeader = false, libraryHeader = false;
+    int listed = 0;
     for (const auto& entry : processor_.library().entries()) {
+        if (listed >= kMaxListed) break;
         if (!entry.onDisk && !sessionHeader) { instrumentBox_.addSectionHeading("This project"); sessionHeader = true; }
         if (entry.onDisk && !libraryHeader)  { instrumentBox_.addSectionHeading("Library");      libraryHeader = true; }
         menuIds_.add(entry.id);
         instrumentBox_.addItem(entry.name, menuIds_.size());
+        ++listed;
     }
-    instrumentBox_.addSeparator();
-    instrumentBox_.addItem("+ Create New Instrument", kCreateNewItemId);
 
+    // On the prompt screen the box shows "+ Create New Instrument" rather than
+    // the instrument still loaded underneath - showing a name there implied you
+    // were about to edit it, when Generate would in fact make a new one.
+    const bool chat = processor_.showingChat() || processor_.currentInstrument() == nullptr;
     const int index = menuIds_.indexOf(processor_.currentInstrumentId());
-    if (index >= 0) instrumentBox_.setSelectedId(index + 1, juce::dontSendNotification);
+    if (chat && !processor_.chatEditsCurrent())
+        instrumentBox_.setSelectedId(kCreateNewItemId, juce::dontSendNotification);
+    else if (index >= 0)
+        instrumentBox_.setSelectedId(index + 1, juce::dontSendNotification);
+
+    instrumentBox_.setTooltip(describeCurrentInstrument());
     updatingMenu_ = false;
+}
+
+/// What you get by hovering the instrument name.
+///
+/// The point is accountability. If someone asks for the guitar from Gorgeous,
+/// they should be able to check that Forge actually recognised Gorgeous rather
+/// than quietly building a generic gritty lead and hoping. Showing the
+/// references back is also the honest failure mode: an empty list says plainly
+/// that nothing specific was recognised.
+juce::String ForgeEditor::describeCurrentInstrument() const {
+    const auto* inst = processor_.currentInstrument();
+    if (inst == nullptr) return "Describe an instrument to generate one.";
+
+    juce::String text(inst->name);
+    if (!inst->description.empty())
+        text << "\n" << juce::String(inst->description);
+
+    if (const auto prompt = processor_.promptForCurrent(); prompt.isNotEmpty())
+        text << "\n\nYou asked for:\n  \"" << prompt << "\"";
+
+    if (auto it = inst->meta.find("references");
+        it != inst->meta.end() && it->is_array() && !it->empty()) {
+        text << "\n\nBuilt from:";
+        for (const auto& r : *it)
+            if (r.is_string()) text << "\n  - " << juce::String(r.get<std::string>());
+    } else {
+        text << "\n\nNo specific record or artist was recognised in that request.";
+    }
+
+    text << "\n\n" << juce::String(inst->voicing == "poly" ? "Polyphonic" : "Monophonic")
+         << ", " << inst->polyphony << (inst->polyphony == 1 ? " voice" : " voices");
+
+    if (processor_.hasReference())
+        text << "\nReference recording: " << processor_.referenceName()
+             << "\n  " << juce::String(processor_.reference().toSummaryLine());
+
+    return text;
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +362,7 @@ void ForgeEditor::showMainMenu() {
 
     menu.addItem(1, "Edit with chat", haveInstrument && !chat);
     menu.addItem(2, "New instrument", true);
+    menu.addItem(10, "Load full architecture", true);
     menu.addSeparator();
     menu.addItem(3, "Controls", haveInstrument && !chat, !graphMode);
     menu.addItem(4, "How it's built", haveInstrument && !chat, graphMode);
@@ -316,6 +392,7 @@ void ForgeEditor::showMainMenu() {
                                case 7: showSettings(); break;
                                case 8: juce::File(processor_.lastLogPath()).revealToUser(); break;
                                case 9: ForgeConfig::instrumentsDirectory().revealToUser(); break;
+                               case 10: processor_.loadFullArchitecture(); break;
                                default: break;
                            }
                        });
@@ -347,7 +424,7 @@ void ForgeEditor::showRenameDialog() {
 void ForgeEditor::showSettings() {
     juce::DialogWindow::LaunchOptions options;
     options.content.setOwned(new SettingsPanel(processor_));
-    options.dialogTitle = "Forge settings";
+    options.dialogTitle = "IndieVST settings";
     options.dialogBackgroundColour = ForgeLookAndFeel::background();
     options.escapeKeyTriggersCloseButton = true;
     options.useNativeTitleBar = true;
@@ -374,21 +451,57 @@ void ForgeEditor::drawMeter(juce::Graphics& g, juce::Rectangle<int> area) const 
 void ForgeEditor::paint(juce::Graphics& g) {
     g.fillAll(ForgeLookAndFeel::background());
 
-    // Header.
+    // --- header ------------------------------------------------------------
+    //
+    // A flat slab the same colour as the panels read as an unfinished window.
+    // The chrome now sits DARKER than the work surface with a lit top edge and
+    // an accent hairline along the bottom, so the instrument looks inset into
+    // the product rather than painted onto it.
     auto header = getLocalBounds().removeFromTop(kHeaderH);
-    g.setColour(ForgeLookAndFeel::panel());
-    g.fillRect(header);
-    g.setColour(ForgeLookAndFeel::outline());
-    g.fillRect(header.removeFromBottom(1));
+    {
+        juce::ColourGradient bar(juce::Colour(0xff1b1d23), 0.0f, 0.0f,
+                                 juce::Colour(0xff101216), 0.0f, (float) kHeaderH, false);
+        g.setGradientFill(bar);
+        g.fillRect(header);
 
-    auto wordmark = juce::Rectangle<int>(14, 0, 90, kHeaderH);
-    g.setFont(fonts::title());
-    g.setColour(ForgeLookAndFeel::textPrimary());
-    fonts::drawTracked(g, "FORGE", wordmark, juce::Justification::left, 2.0f);
+        g.setColour(juce::Colours::white.withAlpha(0.05f));
+        g.fillRect(header.getX(), header.getY(), header.getWidth(), 1);
 
-    // Accent tick beside the wordmark: the only saturated pixel in the chrome.
-    g.setColour(lookAndFeel_.accent());
-    g.fillRect(juce::Rectangle<int>(14, kHeaderH / 2 + 8, 22, 2));
+        // Accent rule under the header, fading out to the right. One saturated
+        // line is what makes chrome look designed instead of merely dark.
+        const auto accent = lookAndFeel_.accent();
+        juce::ColourGradient rule(accent.withAlpha(0.85f), 0.0f, 0.0f,
+                                  accent.withAlpha(0.0f), (float) getWidth() * 0.72f, 0.0f, false);
+        g.setGradientFill(rule);
+        g.fillRect(header.getX(), header.getBottom() - 1, header.getWidth(), 1);
+    }
+
+    // --- wordmark ----------------------------------------------------------
+    // "Indie" in light weight, "VST" heavy: the split reads as a logo at a
+    // glance rather than as a run of tracked capitals.
+    {
+        const int baseX = 16;
+        const auto titleFont = fonts::get(15.0f, fonts::Weight::Regular);
+        const auto boldFont  = fonts::get(15.0f, fonts::Weight::SemiBold);
+        const auto row = juce::Rectangle<int>(baseX, 0, 160, kHeaderH);
+
+        const float indieW = juce::GlyphArrangement::getStringWidth(titleFont, "Indie") + 1.5f;
+
+        g.setFont(titleFont);
+        g.setColour(ForgeLookAndFeel::textSecondary());
+        fonts::drawTracked(g, "Indie", row, juce::Justification::centredLeft, 0.6f);
+
+        g.setFont(boldFont);
+        g.setColour(ForgeLookAndFeel::textPrimary());
+        fonts::drawTracked(g, "VST", row.withTrimmedLeft(juce::roundToInt(indieW)),
+                           juce::Justification::centredLeft, 0.6f);
+
+        // A short accent underscore beneath "VST" only.
+        g.setColour(lookAndFeel_.accent());
+        g.fillRect(juce::Rectangle<float>(baseX + indieW, kHeaderH * 0.5f + 9.0f,
+                                          juce::GlyphArrangement::getStringWidth(boldFont, "VST"),
+                                          1.6f));
+    }
 
     drawMeter(g, juce::Rectangle<int>(getWidth() - 86, kHeaderH / 2 - 3, 70, 6));
 
@@ -443,7 +556,7 @@ void ForgeEditor::resized() {
     auto bounds = getLocalBounds();
 
     auto header = bounds.removeFromTop(kHeaderH);
-    header.removeFromLeft(112);                 // wordmark
+    header.removeFromLeft(122);                 // wordmark
     header.removeFromRight(96);                 // meter
     header = header.reduced(0, 5);
     menuButton_.setBounds(header.removeFromRight(64));
@@ -454,8 +567,9 @@ void ForgeEditor::resized() {
 
     if (keyboard_.isVisible()) {
         // Scale the keyboard so the range exactly spans the window instead of
-        // leaving a slab of empty white at the right-hand end.
-        const int height = juce::jlimit(46, 96, getHeight() / 6);
+        // leaving a slab of empty white at the right-hand end. Kept short: the
+        // rack needs the height far more than the keyboard does.
+        const int height = juce::jlimit(38, 58, getHeight() / 12);
         auto area = bounds.removeFromBottom(height).reduced(10, 5);
         keyboard_.setBounds(area);
 

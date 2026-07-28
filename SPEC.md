@@ -365,6 +365,784 @@ The UI renderer is generic: it lays out sections in a responsive grid, draws eac
 per its `control` type and `taper`, and applies the accent colour. It **never** trusts
 the theme for anything but colour and label text (no HTML, no scripts, no file paths).
 
+### 5.8 Model-authored layout
+
+The most common failure of a generated instrument is that it does not look generated.
+If every patch renders through the same fixed furniture, a glass bell and a distorted
+sub arrive on screen as one picture with different numbers under the knobs — and a
+producer reads that, correctly, as a preset browser wearing a costume.
+
+So the model designs the front panel as well as the sound. It emits a `layout` block:
+
+```jsonc
+{ "pages": [ { "title": "ENGINE", "panels": ["WAVETABLE","OSC A","SUB","MIX"] },
+             { "title": "GRIT",   "panels": ["DRIVE","SHAPER","TAPE","FILTER 1"] },
+             { "title": "LOW END","panels": ["EQ","TRANSIENT","GATE","OUTPUT"] } ],
+  "featured": ["WAVETABLE","DRIVE"],
+  "panel_accent": { "WAVETABLE": "#C9762B", "DRIVE": "#8A3B24" } }
+```
+
+- **Pages** are the tabs, in reading order, named for what this instrument does.
+- A panel placed on no page is **removed from the instrument outright**, module and
+  all. That is how a four-panel plucked string exists alongside a fourteen-panel bass.
+- **Panel order within a page** is draw order — the arrangement itself is authored.
+- **`featured`** panels are drawn with larger controls over fewer rows, giving the
+  page a focal point instead of a uniform tile grid.
+- **`panel_accent`** colours individual blocks, so the palette carries the mood.
+
+**The boundary is unchanged: the model chooses arrangement, never capability.** Every
+panel it can place is backed by a precompiled module that already passed the isolation
+sweeps in §8. Layout is applied *after* section pruning and *before* repair, and is
+bounded by four guarantees, each with a regression test in `tests/test_layout.cpp`:
+
+| Guarantee | Enforcement |
+|---|---|
+| Output stage survives | Nodes of type `out.*` and `vca`, plus whatever drives the amp envelope, are protected and force-placed on the last page if the model forgot them |
+| The instrument makes a sound | If no oscillator panel was placed, the first one is restored to page 1 |
+| No two-knob synth on stage | A layout naming fewer than 4 known panels is treated as a malformed response and **discarded entirely** — the complete default rack is kept |
+| No dangling references | Unknown panel names are ignored; `ui.sections` is rebuilt from surviving params only; page count is capped at 6 |
+
+---
+
+### 5.10 Voicing, and telling the musician what was recognised
+
+Two failures found by testing against the real target — "the distorted guitar
+lead from Kanye West's *Gorgeous*":
+
+**Voicing.** The model returned a monophonic legato patch, because "lead" reads
+as one-note-at-a-time. But that riff opens on a C# chord, and a guitar is a
+polyphonic instrument regardless of what it is playing. A mono instrument played
+as a chord sounds broken and the musician cannot fix it from the front panel.
+Two defences, because this is silent and unrecoverable:
+
+1. The prompt states the rule explicitly — the test is what the real instrument
+   physically does, not whether the word "lead" appeared; when in doubt, poly.
+2. `buildPatchPrompt` scans the request for a chordal instrument (guitar, piano,
+   Rhodes, organ, strings, bells…) and appends a deterministic one-line note.
+   This runs on the edit path too.
+
+**Attribution.** `references` carries what the model actually drew on — one line
+per record, artist, synth or era, with what was taken from it — and it appears
+on hover over the instrument name, alongside the original prompt and the
+voicing. If someone asks for Kanye, they can check that Kanye was recognised
+rather than trusting that a generically gritty lead means it understood. An
+empty list is shown as *"no specific record or artist was recognised"*, because
+inventing a plausible influence is worse than admitting none.
+
+The field lives in `meta` rather than as a new member of `ir::Instrument`:
+changing that struct forces a full clean rebuild on every machine, and this is
+presentation, not schema.
+
+---
+
+### 5.9 Reference audio (optional input)
+
+Describing a sound in words is hard. Playing one is easy. A producer can drop a
+recording onto the generation screen and Forge measures it, then hands the
+measurements to the model alongside the text prompt.
+
+**This is analysis, not sampling.** Nothing of the source audio survives into the
+instrument: the file is decoded, measured, and discarded. The output is a
+synthesiser built from the same precompiled modules as any other generation.
+That distinction is legal as much as musical — no copyrighted audio is embedded,
+redistributed, or resynthesised.
+
+`forge_core/audio/ReferenceAnalysis` is JUCE-free and runs once on a background
+thread. It extracts:
+
+| Group | Measurements |
+|---|---|
+| Pitch | fundamental (Hz), note name, cents offset — or an explicit "unpitched" |
+| Spectrum | centroid, 85% rolloff, tilt in dB/oct, low/mid/high energy split |
+| Character | harmonicity, inharmonicity, spectral flatness, odd/even harmonic ratio |
+| Shape | attack, decay, sustain level, release, crest factor |
+| Stereo | width from inter-channel correlation, peak and RMS |
+
+Three implementation notes that are the difference between working and appearing
+to work, each pinned by a test in `tests/test_reference.cpp`:
+
+- **Fixed comparison length.** Autocorrelation over `window - lag` inflates the
+  score of long lags, biasing every reading about 10 cents flat.
+- **Peak picking, not thresholding.** A 55 Hz note correlates at 0.98 with itself
+  30 samples later, so "first lag above threshold" reports a bass note as 1600 Hz.
+  Candidate periods must be local maxima, and the shortest near-best peak wins —
+  otherwise a guitar at D3 comes back as D2 and the instrument is built an octave
+  low.
+- **Level independence.** The signal is peak-normalised before analysis, so the
+  same bounce at −18 dBFS and −3 dBFS describes one instrument.
+
+The measurement block is prepended to the *user* message, never the system
+prompt, so provider-side prompt caching still hits. It states explicitly that
+where the text and the recording disagree, **the text wins** — the recording is
+what the musician has, the text is what they want.
+
+---
+
+### 5.11 One window shape
+
+The rack briefly resized the window per tab, so a sparse page would not swim in
+empty panel. It worked and it was still wrong: a plugin window that changes size
+under the mouse reads as instability, and in a DAW it is actively unpleasant.
+
+The window is now fixed at 7:3 for both screens, and the **rack fits itself to
+the window** instead. `layoutActiveTab` searches row counts 1-6 against control
+scales from 2.2 down to 0.34 and takes the largest that genuinely fits, measuring
+the real wrapped result rather than estimating it. If nothing fits — a 67-control
+page in a small window — it takes the arrangement that overflows least, rather
+than a fixed guess.
+
+---
+
+### 5.12 Never losing a design to a formatting accident
+
+`"The model did not return a JSON object"` was the worst failure in the product.
+It discarded a complete instrument over a transport hiccup and dropped the
+musician onto a hand-authored fallback with a dozen knobs — which on screen
+reads as a broken plugin, not a degraded one.
+
+Two independent fixes, because this must not happen on stage.
+
+**Salvage** (`core/llm/JsonSalvage`) tries three things in order and reports
+which one worked, so a recovered patch is never presented as a clean one:
+
+| Attempt | Handles |
+|---|---|
+| Parse as-is | the normal case |
+| Largest balanced `{…}` in the text | markdown fences, "Here is your instrument:", trailing chat. *Largest*, not first — a decoy object in the prose used to win by appearing earlier |
+| Truncation repair | a read that timed out or a token ceiling hit mid-object: close the open string, drop the partial trailing member, close every open bracket — and require the result to parse before accepting it |
+
+It never returns text that does not parse, and it never invents a value: a key
+cut off before its value is dropped, not guessed. `max_tokens` is also now set
+explicitly to 16000, since a full patch is ~130 values plus layout, matrix,
+wavetable and references.
+
+**The floor** (`arch::heuristicPatch`) replaces the canned library as the last
+resort. It reads the prompt for instrument type and mood with no model
+involved, and returns a patch for the full architecture — three balanced pages,
+a mood-matched palette, envelope and filter settings that follow the words. It
+is deterministic, so the same request always degrades to the same instrument.
+
+The point: **when Forge fails, it fails to something that still looks like an
+instrument.** A dry bass does not arrive drenched in reverb, a pad still swells,
+a guitar is still polyphonic, and no page ever has three knobs floating in it.
+
+---
+
+### 5.13 A record is not a sample
+
+The reference feature shipped with a serious flaw, found the only way it could
+be: a producer dropped in a finished Kanye record, asked for the guitar from it,
+and got **filtered white noise**.
+
+The analyser was not wrong. A dense mix genuinely is spectrally flat, weakly
+pitched, broadband and heavily compressed — which is precisely how noise
+measures. The mistake was presenting measurements of a *mix* as though they
+described one *instrument*.
+
+**Mix detection.** Four independent signs, none conclusive alone: energy present
+across all three bands, no confident fundamental, tonal energy smeared over many
+pitch classes, and a small crest factor. Above 0.5 the recording is treated as a
+record rather than a sample.
+
+**Chroma.** A single fundamental does not survive mixing; pitch classes do,
+because the guitar, bass and keys all reinforce the same ones. On the synthetic
+Kanye-shaped fixture this correctly returns **C#** — the note the riff is
+actually on, which no single-pitch detector was ever going to find.
+
+**Two different briefs.** An isolated sound gets the full measurement list as
+design targets. A mix gets a deliberately shortened one — key centres, register,
+tonal balance, tilt, width — with harmonicity, flatness, attack and odd/even
+*withheld*, and an explicit account of why:
+
+> Do NOT use a noise oscillator because a mix measured as flat. Do NOT match the
+> mix's brightness directly — a record contains cymbals and vocal air your one
+> instrument will not have.
+
+**A deterministic backstop.** If the request names a pitched source *and* a
+reference was supplied, `buildPatchPrompt` appends a hard instruction to keep
+the noise oscillator near zero. This does not depend on the model reading a long
+prompt carefully. Genuinely unpitched requests — waves, cymbals, wind — are left
+alone, since noise is the right answer there.
+
+### 5.14 Layout performance
+
+The fill-the-page work made the window unusable to drag. The layout search
+evaluated ~900 candidate arrangements per resize, and each one called
+`widthUnits()` on every control — which measures a string, glyph by glyph. On a
+130-control page that is on the order of half a million text layouts per resize.
+
+Two fixes, both structural rather than micro-optimisation:
+
+- **`widthUnits()` is cached per control.** It depends on the label and the
+  option list, neither of which changes after construction.
+- **Column widths are computed once per (panel, row count)** before the search
+  begins, as unit multipliers, so evaluating a candidate is float arithmetic
+  with no allocation.
+- **The scale search is coarse-to-fine** — a 0.12 sweep, then a 0.02 refinement
+  around the winner — reaching the same answer in roughly a quarter of the
+  evaluations.
+
+---
+
+### 5.15 Honouring the whole brief
+
+A producer wrote a precise request — four macros named Weight, Bite, Motion and
+Space; glide for overlapping notes; the mod wheel mapped to distortion,
+brightness and movement — and got an instrument with none of those, plus a
+description confidently claiming all of them. It sounded right and was
+unplayable the way they asked.
+
+Three separate causes, all now fixed.
+
+**1. It was not possible.** The patch schema had no `macros` field. The
+architecture built five fixed macros and nothing let the model name or rewire
+them, so compliance was structurally impossible. `macros` is now authored:
+label, default and a list of routes into any exposed control. A macro wired to
+nothing is discarded — a knob that moves nothing is worse than a missing knob,
+because it lies.
+
+**2. Two namespaces for the same thing.** The model is shown *control* ids
+(`f1_cutoff`, `dr_drive`), but modulation addresses *node.param*
+(`filt_1.cutoff`, `drive.drive`). It wrote `lfo_1.depth`, the route was silently
+dropped as invalid, and the wheel did nothing while the description said
+otherwise. `applyPatch` now resolves either form, and still rejects targets that
+exist in neither.
+
+**3. Nothing was checking.** This is the structural one. A model that satisfies
+most of a list and narrates all of it passes unnoticed forever unless something
+verifies. `core/llm/Compliance` extracts checkable requests from the prompt —
+named macros and their count, glide, mod-wheel mappings and their specific
+targets, velocity-to-filter, initial pitch movement, mono low end, restrained
+reverb — checks each against the built instrument, and hands misses back as an
+itemised correction for one retry. The retry is kept **only if it satisfies
+strictly more** requirements; a second pass that fixes two things and breaks
+three is not an improvement.
+
+The result line now states the score plainly: *"Ready. 7 of 9 specific requests
+satisfied — missing: glide between notes, mod wheel increasing distortion."*
+Extraction is deliberately narrow and would rather miss a request than invent
+one; every requirement only fires when its words actually appear.
+
+### 5.16 Name and chrome
+
+The plugin is **IndieVST**. `PRODUCT_NAME`, `getName()` and the wordmark all
+say so; the CMake target stays `Forge` because renaming it would churn every
+reference in the build for no user-visible gain.
+
+The header was a flat slab the same colour as the panels, which read as an
+unfinished window. It is now darker than the work surface with a lit top edge
+and an accent hairline fading out along the bottom, so the rack looks inset into
+the product. The wordmark sets "Indie" in regular and "VST" in semibold with an
+accent underscore beneath the second half only — it reads as a logo rather than
+a run of tracked capitals.
+
+---
+
+### 5.17 Any instrument, not only synthesisers
+
+A producer asked for "a bass like Steve Lacy and Thundercat" — both bass
+*guitar* players — and got a synthesiser. Twice. The sound was fine; it was the
+wrong instrument.
+
+The cause was the macros bug again, exactly: **`osc.karplus` was in the module
+library, tested and safe, and simply not in the rack.** A Karplus-Strong
+physical model had existed the whole time and no prompt could reach it, so every
+request for a guitar, harp, koto or bass had nothing but saws and FM to work
+with and dutifully came back sounding like a synth.
+
+Three modules now sit in the voice chain, all at zero mix so nothing else
+changes:
+
+| Node | Module | What it is for |
+|---|---|---|
+| `osc_string` | `osc.karplus` | A plucked string: noise decaying in a tuned delay. Level, damping, pick tone, sustain. |
+| `body` | `filter.comb` | The box the sound comes out of — guitar body, soundboard, cello belly. |
+| `vowel` | `filter.formant` | Cavity and throat character for winds and voice. |
+
+The prompt now carries construction recipes for plucked and struck strings,
+electric bass and guitar, bowed strings, piano and Rhodes, mallets and metal,
+winds and voice — each naming the specific controls and the values that matter.
+The key insight it teaches: *a plucked string is not an oscillator with a fast
+envelope; it is an excitation decaying inside a resonator.*
+
+**And it is checked.** If the request names a real instrument and does not ask
+for a synth, `Compliance` verifies the patch actually reaches for the physical
+model or FM rather than the default oscillator stack, and sends it back with
+specific instructions if not. Bare "bass" counts as bass guitar, because that is
+what it means to a musician; "synth bass", "808", "sub bass", "analog", "reese"
+and "wavetable" all opt out. The offline floor honours this too — ask it for a
+nylon guitar with no network and it builds a string, not a saw.
+
+---
+
+### 5.18 The capability audit
+
+This project produced the same bug four separate times, and each one presented
+as the model ignoring a direct instruction:
+
+| Symptom | Actual cause |
+|---|---|
+| "Four macros named Weight, Bite, Motion, Space" produced the five stock ones | The patch schema had no `macros` field |
+| Every guitar and bass came back a synthesiser | `osc.karplus` was in the library, not in the rack |
+| Glockenspiels came out harmonic, like an organ | `osc_fm.ratio` had no control, so non-integer ratios were unselectable |
+| "Pitch movement at the start of each note" never appeared | `pitch_mod_semis` had no knob to route to |
+
+**A capability that exists in the engine and cannot be reached from a prompt is
+invisible, and invisible capability is indistinguishable from a disobedient
+model.** Every hour spent tuning prompt wording against one of these was wasted.
+
+`tests/test_capability.cpp` now fails the build when anything is added to the
+engine and not wired up. Every module must be in the rack, every node parameter
+must have a knob, every setting must have a selector — or appear on an exemption
+list **with a written reason**, which forces the decision to be deliberate rather
+than forgotten. It also asserts that every control and modulation source in the
+rack actually appears in the system prompt, because a knob the model is never
+shown may as well not exist.
+
+Bugs the audit found immediately on first run:
+
+- **`gt_hld` had a logarithmic taper with a zero minimum**, so the full
+  architecture *did not validate*. Any generation that kept the GATE panel
+  failed and fell back silently. It went unnoticed for weeks because the layout
+  pass usually pruned that panel. There is now a test that the bare rack
+  validates and builds.
+- **`SwitchControl` had no branch for float settings.** They fell through to the
+  integer case and were enumerated as whole numbers — which is why no
+  inharmonic FM ratio could be chosen. Float settings now render as a curated
+  list, with the inharmonic ratios labelled as metallic.
+- **Instrument names were matched as substrings**, so "flute" matched "lute" and
+  a breathy flute was told to build a plucked string. "harpsichord" matched
+  "harp" the same way. Matching is now word-bounded.
+- Seven further modules and thirty controls were unreachable; `fx.chorus`,
+  `fx.pitch`, FM ratio/fine/pitch-mod, per-oscillator pitch modulation and the
+  semitone transposers are all now exposed.
+
+### 5.19 The whole orchestra
+
+`tests/test_orchestra.cpp` builds sixteen instruments across every family —
+nylon and electric guitar, bass, cello, violin, viola, glockenspiel,
+vibraphone, marimba, piano, Rhodes, church organ, flute, brass, harp, kalimba —
+from the recipes the prompt teaches. Each must validate, build a graph, render
+audio that is finite, audible and inside the limiter, and be recognised by the
+compliance checker as the instrument it claims to be.
+
+That last condition is the important one: **if a recipe in the prompt cannot
+satisfy the checker, the prompt is lying to the model.** Forty-five instrument
+names are classified into six families — plucked, bowed, struck, mallet, wind
+and reed — each with its own construction requirement.
+
+---
+
+### 5.20 Requests versus guarantees
+
+Three mechanisms already existed to stop "electric guitar" returning a
+sawtooth synth: the prompt teaches the recipe, the checker catches the miss,
+the retry sends it back with instructions. **All three are requests.** It came
+back a synth anyway.
+
+`llm::enforceInstrumentFamily` is the guarantee. If the musician named a
+plucked, struck, bowed or reed instrument and the patch still is not built that
+way after the retry, the *source section* is rebuilt deterministically — string
+level, damping and pick tone for plucked; FM with a matching modulator ratio
+for struck and mallet; body and a bowed attack for strings and winds. Mood
+words in the prompt still steer it, so a "warm muted lofi guitar" gets more
+damping and a darker pick tone than a "bright crisp steel guitar".
+
+Everything else the model chose is left alone — filter, effects, layout,
+macros. Overwriting those would make every corrected instrument identical, and
+there is a test asserting they survive untouched. The correction is recorded in
+the repair report, so the musician is told it happened.
+
+This is defensible because it is not a matter of taste: a plucked string is a
+physical model, not a sawtooth, and that knowledge is ours, deterministic and
+testable.
+
+**Attribution** is checked the same way. If the request points at a person or a
+record — "like Steve Lacy", "inspired by", "-esque" — and contains a proper
+noun, `references` must be non-empty. Previously there was no way to tell
+whether a named artist had been used or silently ignored.
+
+### 5.21 More unreachable-capability bugs
+
+The audit's own pattern caught two more:
+
+- **The offline fallback's entire effects section did nothing.** It wrote to
+  `dly_mix`, `drv_amount`, `rev_mix`, `tape_amount` and `wid_amount` — none of
+  which are real control ids. `applyPatch` warns and moves on, so the safety-net
+  instrument applied cleanly and changed nothing. There is now a test that every
+  control id referenced anywhere in the codebase resolves, and that two very
+  different prompts produce measurably different fallback instruments.
+- **Renaming `PRODUCT_NAME` without renaming the CMake target** left
+  `Forge.exe`/`Forge.vst3` sitting beside the new `IndieVST` artefacts. Both
+  load fine, so it was easy to keep launching the old one and conclude that
+  none of the changes had landed — which is exactly what happened. The target is
+  renamed too, and the build now emits a warning if a stale `Forge.vst3` is
+  found in the VST3 folder.
+
+---
+
+### 5.22 The plucked string, and how to measure a pitch bug
+
+Reported as "fine at C9 but horrible at C4 - makes no sense for a BASS". Four
+separate defects were behind it, three now fixed.
+
+**1. Decay was applied per sample.** The coefficient multiplied the feedback
+loop every sample, so the gain per PERIOD was `decay^period` - and the period is
+a hundred times longer in the bass than the treble. At 0.992 a top-octave note
+lost 4% per period and rang for seconds; a C2 lost 99.8% and was gone in three
+milliseconds. The knob now sets a ring time and the per-sample coefficient is
+derived from it.
+
+**2. Damping was a fixed cutoff in Hz.** The loop filter is applied once per
+trip, so its attenuation also compounds per period: a fixed 3.6 kHz cutoff damps
+a 440 Hz note 440 times a second and an 82 Hz note only 82. Brightness is now
+held relative to the fundamental, never below four harmonics above the note.
+These first two imbalances ran in opposite directions and partly cancelled,
+which is why the instrument sounded plausible mid-keyboard and wrong at both
+ends.
+
+**3. No DC blocker in the loop.** The damping filter has unity gain at DC and
+the loop gain approaches 0.99999, so whatever DC the excitation burst contained
+was amplified towards `1/(1-g)`. Measured offsets reached **-0.046 against a
+signal RMS of 0.05** - the string spent most of its life pinned off-centre,
+eating headroom and pumping the limiter. A `DcBlocker` in the feedback path
+takes it to +/-0.0001.
+
+**4. The excitation burst was a fixed 4 ms** regardless of pitch - four periods
+at C7, a quarter of one at C2. It now scales with the period, and `holdsVoice`
+covers the whole ring rather than just the pluck, so voices are no longer stolen
+mid-note.
+
+**Still open: the string plays an octave low inside the graph.** Isolated but
+not root-caused. See the note on the failing test in `tests/test_string.cpp`.
+
+**On measurement.** Three methods disagreed with each other during this
+investigation and two of them sent me down blind alleys - at one point I
+concluded the entire engine was an octave low, which was false. Autocorrelation
+octave-errs on harmonic-rich material; zero-crossing counts are corrupted by
+harmonics *and* by DC offset; a low-pass-then-count approach fails when the
+filter sits close to the fundamental. **Goertzel settles it** - exact energy at
+a chosen frequency, no interpretation - and is what any future pitch claim in
+this project should be backed by.
+
+---
+
+### 5.23a Where a DC blocker belongs
+
+Removing the DC that a Karplus loop accumulates is necessary, but putting the
+blocker INSIDE the feedback path was wrong, and wrong in a way that only the
+bottom octave revealed. Everything in that loop is applied once per trip, so the
+blocker's low-frequency attenuation compounds **per period**: at 55 Hz that is
+55 applications a second, and A1 came out roughly ten times quieter than either
+of its neighbours.
+
+Filtering the excitation burst on its way in achieves exactly the same thing -
+no DC enters, so none can accumulate - and leaves the loop's own response
+untouched. Moving it made the bottom octave **22x louder** (E(f0) at 41 Hz went
+from 0.0004 to 0.0086) and brought every note from E1 to C6 to the right pitch
+at a healthy level.
+
+The general rule: anything placed inside a resonator's feedback path has its
+effect multiplied by the number of trips per second, which is the pitch. A
+filter that is gentle at one end of the keyboard is savage at the other.
+
+### 5.23 A macro at rest must do nothing
+
+The single worst bug found in this project, and it had been silently rewriting
+every instrument ever generated.
+
+Macros offset exposed parameters. The offset was computed straight from the
+macro's current position, so a macro sitting at its authored default was
+**already contributing**. The stock row shipped with `Body` at 0.4 routing +0.5
+to the sub oscillator, `Space` at 0.3 routing +0.5 to reverb, `Drive` at 0.2
+routing +0.6 to drive:
+
+| The model asked for | What was actually built |
+|---|---|
+| `osc_sub_level: 0.0` | sub oscillator at 0.2 |
+| `rv_mix: 0.05` (deliberately dry) | reverb at 0.20 |
+| a clean tone | drive raised by 0.12 |
+
+So **every generated instrument carried an unrequested sine an octave below the
+note**. On a plucked string, whose own fundamental is weak, that buried tone was
+the loudest thing in the output - which is exactly why a bass guitar sounded an
+octave low and "like ass". Measured with Goertzel: `E(f0/2)` fell from 0.076 to
+0.00002 when this was fixed, and the string's fundamental went from being
+outnumbered 50:1 to leading by 150:1.
+
+It also explains why the macros felt dead. Half their travel was spent undoing
+an offset that should never have been applied, and the parameters they moved
+were already sitting part-way up their range.
+
+The fix is one subtraction: the offset is measured **from the macro's default
+position**, so an untouched macro contributes exactly zero and its full travel
+is available in both directions. That is also what a macro means musically - a
+performance control that starts where the sound designer left it.
+
+**The lesson is the same one this project keeps learning.** Nobody was checking
+that `level: 0` produced silence. A parameter that cannot reach its own stated
+minimum is invisible until someone hears it, and by then it looks like the model
+disobeying rather than the engine lying.
+
+---
+
+### 5.24 The gate is the source of truth
+
+`porcelain_pluck` held a voice forever after noteOff. The envelope's release
+depended entirely on a one-shot `noteOff()` callback arriving, and if it did not
+- for any reason - the envelope sat in sustain, held its voice, and the note
+never stopped. A held voice is never handed back, so polyphony leaked until the
+instrument stopped responding.
+
+`env.adsr` now reads `VoiceContext::gate` at the top of every block: gate low
+and still sounding means release, unconditionally. The voice manager already
+maintained that state, so the envelope is self-correcting - whatever happens to
+the callback, an envelope whose gate is low WILL release.
+
+The general principle, and the third time this project has learned it: **prefer
+state that is re-evaluated every block over an event that must arrive exactly
+once.** An event you can miss is a bug waiting for the right timing; state you
+re-read is self-healing.
+
+### 5.25 Not everything is a knob
+
+Two instruments with identical geometry in different palettes read as the same
+product. Colour was never going to be enough, so the model now chooses the
+control SHAPES and the visual LANGUAGE as well.
+
+**Control shapes** (`controls` in the patch, per exposed control id):
+
+| Shape | For |
+|---|---|
+| `vslider` | things that move up and down - pitch, transpose, a sweep. A vertical pitch fader is standard on real instruments |
+| `hslider` | blends, mixes, morphs - a travel between two things |
+| `toggle` | genuinely two-state: sync, bypass, mono/stereo |
+| `knob` | everything else, which is still most things |
+
+An unknown shape leaves the control alone rather than reaching the UI as
+something it cannot render.
+
+**Visual language** (`layout.style`) changes the geometry, not just the palette:
+
+| Style | Rendering |
+|---|---|
+| `sharp` | angular pointers, tick marks, tight rings - clinical, utilitarian |
+| `soft` | thick rounded arcs, no ticks, larger caps - warm and hand-made |
+| `vintage` | cream faces, chunky caps, dark lettering |
+| `minimal` | hairline indicators, thin rings, almost no chrome |
+
+The offline floor honours both. "A warm dusty reggae groove bass" comes back
+`vintage` in amber with warm per-panel accents; "a bright clinical techno stab"
+comes back `sharp` in teal. Same engine, different objects.
+
+**One trap worth naming.** The first version styled `osc_a_pmod` on every
+instrument - including plucked ones, which have no OSC A panel at all, so the
+setting silently did nothing. That is the same dead-reference failure this
+codebase has produced five times now. `tests/test_capability.cpp` now asserts
+that every control the offline patch shapes actually survives into the
+instrument it builds.
+
+---
+
+### 5.26 Why a physically-modelled guitar still sounded like a synth
+
+The routing was right. `str_level` 0.85, oscillators pulled back to 0.15, body
+engaged, sensible filtering - and it still did not sound like a guitar. Getting
+the right MODULE turned out to be necessary and nowhere near sufficient.
+
+**A bare Karplus-Strong string is very close to a filtered sawtooth**: every
+harmonic present at full strength, all of them perfectly in tune with each
+other, no excitation character, and full bandwidth to Nyquist. Four things
+separate that from an instrument, and each is now measured rather than asserted.
+
+**1. Pick position** (`str_pick`). A pluck a fraction B along a string cannot
+excite any harmonic with a node there, so every 1/B-th harmonic is missing.
+That comb of notches is the most recognisable signature of a plucked
+instrument - it is why a guitar picked at the bridge is nasal and the same
+string picked over the neck is round. Tested by picking at exactly 1/4 and
+confirming the 4th harmonic drops below its neighbour.
+
+**2. String stiffness** (`str_stiff`). Real strings are stiff, so upper partials
+travel faster and sit progressively SHARP of the harmonic series. Three
+first-order allpasses in the loop; measured, the 8th partial runs +3.5 cents and
+the 12th +6.9 cents while the fundamental stays exactly in tune. Two sign and
+compensation bugs were found here: a negative coefficient made partials flat
+instead of sharp, and the DC approximation to the allpass delay left the whole
+string 21 cents flat, so the phase delay is now evaluated exactly at f0.
+
+**3. Excitation character.** A pick is a band-limited scrape whose brightness
+tracks how hard it is played, not flat white noise. Verified: hard playing has
+more 8th-harmonic energy relative to the fundamental, not merely more level.
+
+**4. A SPEAKER** (`fx.cabinet`) - the single biggest one, and the reason
+anything driven read as synthetic. A guitar cabinet has no deep bass, a
+presence peak around 2-4 kHz and an extremely steep rolloff above 5 kHz.
+Distortion produces harmonics all the way to Nyquist, and it is exactly that
+5-20 kHz fizz - which no real speaker can produce - that the ear hears as
+artificial. Measured: +2.3 dB at 3 kHz, -10 dB at 6 kHz, -28 dB at 10 kHz,
+-49 dB at 16 kHz.
+
+**And a default that was quietly ruining every string.** `str_decay` defaulted
+to 0.985, which through the T60 mapping is a **twelve second ring** - a pad, not
+a pluck. Now 0.90, about four seconds.
+
+**The correction is in two independent parts**, because the reported patch
+exposed the gap between them: the ENGINE corrector rebuilds the source when the
+model reached for oscillators, and a separate TONE corrector fixes voicing when
+the engine is already right but the instrument is voiced like a pad. The
+reported patch triggered only the second, and the first would have returned
+early and declared success.
+
+### 5.27 Why it STILL sounded like a synth: a string with no fundamental
+
+Everything in 5.26 was true and none of it was enough. The report came back
+again - "guitars still sound like pianos and synths, not organic guitars, I want
+that plucky sound" - and this time the measurement was unambiguous. Rendering
+the offline electric guitar at E3 (164.8 Hz) and reading the partials with
+Goertzel:
+
+| partial | level relative to h1 |
+| --- | --- |
+| h2 | +2.1 dB |
+| h3 | +3.0 dB |
+| **h4 (659 Hz)** | **+11.8 dB** |
+
+The loudest thing in a low E was its fourth harmonic. The ear resolves that as
+a different note two octaves up, and "hollow, wrong octave, no bottom" is
+exactly what a synthesiser sounds like. Three separate causes, each measured.
+
+**1. The excitation had no fundamental in it.** Karplus-Strong is usually taught
+as a burst of white noise in a delay line, and white noise starts every harmonic
+at equal strength - which is the spectrum of a filtered sawtooth, the very thing
+5.26 set out to stop sounding like. A real pluck starts from a **triangular
+displacement** with its apex at the pick point, whose harmonics fall away as
+`sin(k·pi·beta) / k²`: the comb of missing harmonics AND, crucially, the 1/k²
+that makes a plucked note fundamental-led. Measured on a bare string, h2 went
+from +12.9 dB above the fundamental to below it.
+
+**2. The pickup reads velocity, not position.** 1/k² alone is correct and
+unusably dull - centroid 418 Hz against 1424 Hz for a real recording of the same
+instrument, with 85% of the energy below 668 Hz. A magnetic pickup, and a
+soundboard, respond to how fast the string is *moving*; velocity is the
+derivative of displacement, which lifts the spectrum by one power of k to about
+1/k. Normalised at the fundamental so brightness stays relative to pitch, for
+the same reason the loop damping is. Measured tilt afterwards: -9.0 dB/oct
+against -8.8 for the reference recording.
+
+**3. The output comb was set to 0.86** and, with the pluck shape now carrying
+the pick comb itself, that was a second full-depth comb on top of the first. It
+is the PICKUP position, it is shallower than that in reality, and at 0.42 it
+colours the tone without taking the fundamental out with it.
+
+### 5.28 A parameter that cannot reach its own minimum, again
+
+Bug class 2 from 5.23, in the modulation matrix rather than in the macros, and
+much worse: **modulation is summed, so `m_vel -> amp.gain` at depth 0.35 put a
+permanent 0.35 floor under the amplifier that the amplitude envelope had no way
+to remove.** The note never ended. Measured on the offline guitar with the
+envelope shut completely - sustain 0, release 1 ms - the level sat at -17 dB
+forever, and was still there eight seconds later.
+
+Every offline instrument did this, and so did every model-authored one that took
+the system prompt's advice, because the prompt said in as many words: "route
+m_vel to amp.gain". A guitar that never stops ringing is an organ. This was the
+single largest contributor to the reported sound, larger than anything in 5.26.
+
+Fixed by giving `ParamDesc` a `multiplicativeMod` flag, set on `vca.gain`. Where
+it is set, each route contributes a factor of `1 + depth·(source - 1)` for a
+unipolar source and `1 + depth·source` for a bipolar one, and the factors
+multiply. An envelope at depth 1.0 is then exactly the envelope, velocity
+becomes a scaling, tremolo works properly, and zero stays reachable whatever
+else is routed in. After: the same note decays to -101 dB by three seconds, and
+velocity still changes the level.
+
+The lesson from 5.23 was "the offset must be measured from the default". The
+lesson here is the more general one: **anything that gates has to multiply.**
+
+### 5.29 A body tuned into the register it supports
+
+`body` is a comb resonator, so it reinforces its frequency and every multiple of
+it *under whatever note is playing*. The rack default was 220 Hz and the offline
+fallback wrote 220 Hz, which is A3 - so on a low E the comb sat squarely on the
+fourth harmonic and produced most of the +11.8 dB above. Real boxes resonate
+BELOW the register they support: a guitar's air resonance is near 100 Hz, a big
+bass body nearer 60. Both the default and the fallback now use those, the prompt
+explains why, and a solid-body electric gets no comb at all - its resonator is
+the speaker.
+
+### 5.30 The offline fallback could not reach the speaker
+
+`heuristicPatch` set `cab_mix` faithfully and it did nothing, because a panel
+that appears on no page is removed from the instrument entirely - node and all -
+and the acoustic layout had no CABINET panel. Every offline electric guitar was
+a DI into a distortion box, which 5.26 identifies as the single biggest tell of
+a modelled guitar. It also still wrote `str_decay` 0.984 - an eleven second ring
+- straight over the top of the default that 5.26 had just fixed, and never set
+`str_pick` or `str_stiff` at all.
+
+This is bug class 1 for the fourth time, and the pattern is now unmistakable:
+**a value that is set but unreachable is indistinguishable from a value that was
+never set, and only a test that renders audio can tell them apart.**
+
+### 5.31 A recording of somebody PLAYING is not a full mix
+
+A producer dropped in a sound sample of one electric guitar - twelve seconds,
+one instrument, nothing else - and it was reported to the model as a FULL MIX
+with its pitch, its attack and its harmonicity all deliberately withheld
+(see 5.x on mix detection). It scored 0.82 on the mix test purely for being
+longer than one note: no single confident fundamental across twelve seconds, and
+energy in all three bands, which is true of a distorted guitar and of a Kanye
+record alike.
+
+The measurements were not wrong. Measuring twelve seconds as though it were one
+note was wrong - the "attack" came out at 3.4 seconds, which is simply where the
+loudest chord happened to fall.
+
+Almost nobody has an isolated single note to hand; they have a recording of
+someone playing. So the analyser now detects note onsets, and where it finds
+several it measures ONE clean note and reports that. The note is chosen by
+level, by how much room it has to ring, by whether the pitch detector is
+confident about it, and against being a chord - picking purely by level chose
+the loudest transient in the clip, which was a scrape with no note in it, and
+the model was told the reference was "unpitched".
+
+Mix detection was rebuilt on the same idea: ask each NOTE whether it has a
+pitch. One instrument answers yes even where the whole clip answers no; a mix
+answers no at every scale, because there is a drum kit inside every window. The
+guitar sample now scores 0.20 and is described as a performance.
+
+**And a pitch that is not a note.** YIN reports the period of the waveform, and
+that is not always the period of a note: two notes a fifth apart repeat at twice
+the period of either, a major third at four times. The guitar recording measured
+**44.7 Hz** - well below its lowest string - and everything derived from that
+fundamental then described the instrument as inharmonic and bell-like. Settled
+by measuring: if the reported fundamental has almost no energy at it and a low
+multiple has plenty, that multiple is the note. Where even that leaves the
+reading weak, the pitch is reported as unreliable and the register and key
+centres are given instead, and the three measurements that are read off the
+fundamental - harmonicity, inharmonicity, odd/even - are withheld rather than
+quoted as something they are not.
+
+### 5.32 The generation that "timed out after 60 seconds"
+
+Not a slow network. The request was not streamed, so **no bytes moved at all
+while the model wrote a 16k-token patch**, and JUCE applies its socket timeout
+per read - which makes a healthy generation and a dead connection look
+identical. At the deadline the whole thing was discarded and the offline
+fallback quietly put in its place, which is what "it timed out and gave me the
+wrong instrument" actually was. Section 10 of the handoff had already recorded
+the per-read behaviour as a reason to disable thinking; the same fact is a
+reason to stream.
+
+All three providers now stream, and the reassembler is JUCE-free so the three
+wire formats are tested headlessly rather than against a network. Bytes arrive
+continuously - the providers send keep-alive pings between tokens - so a read
+timeout only fires on a connection that has genuinely stopped. Whatever arrived
+before a break is kept and repaired by the salvage pass, and the musician is
+told that is what happened. The whole-generation budget went from 60 s to 150 s,
+because it is now the point at which we stop waiting rather than the point at
+which waiting gets mistaken for failure.
+
 ---
 
 ## 6. DSP Primitive Library (MVP set)

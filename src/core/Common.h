@@ -30,14 +30,19 @@ inline constexpr int kControlBlock = 16;
 /// buffer is only kControlBlock samples long. A 64-node graph needs ~16 KB.
 inline constexpr int kNodeBufferSamples = kControlBlock;
 
-// MVP schema caps (SPEC 5). Raising these is a Phase 1 task and requires no
-// architectural change - see SPEC 14.1.
-inline constexpr int kMaxNodes            = 32;
-inline constexpr int kMaxExposedParams    = 24;
-inline constexpr int kMaxMacros           = 8;
-inline constexpr int kMaxAudioConnections = 96;
-inline constexpr int kMaxModRoutes        = 64;
-inline constexpr int kMaxAssets           = 16;
+// Schema caps.
+//
+// Raised from the MVP values (32 nodes / 24 params) to carry a full fixed
+// synth architecture: multiple oscillators, two filters, four envelopes, four
+// LFOs, a modulation matrix and a complete effects chain. An instrument with
+// sixteen knobs is a toy; a producer expects to reach for any part of the
+// signal path, which means the schema has to be able to describe all of it.
+inline constexpr int kMaxNodes            = 96;
+inline constexpr int kMaxExposedParams    = 224;
+inline constexpr int kMaxMacros           = 16;
+inline constexpr int kMaxAudioConnections = 256;
+inline constexpr int kMaxModRoutes        = 192;
+inline constexpr int kMaxAssets           = 24;
 inline constexpr int kMaxParamsPerModule  = 12;
 
 inline constexpr int kMaxVoices     = 32;

@@ -1,9 +1,12 @@
 #include "plugin/PluginProcessor.h"
 
+#include "core/arch/Architecture.h"
 #include "core/dsp/GraphBuilder.h"
 #include "core/ir/IrRepair.h"
 #include "core/ir/IrSafety.h"
 #include "ui/PluginEditor.h"
+
+#include <juce_audio_formats/juce_audio_formats.h>
 
 namespace forge {
 namespace {
@@ -247,6 +250,7 @@ void ForgeAudioProcessor::generate(const juce::String& prompt, bool editCurrent)
 
     session_.start(
         config_, preparedSampleRate_, prompt.trim(), currentJson,
+        juce::String(reference_.valid ? reference_.toPromptText() : std::string()),
         [this, alive](const juce::String& text) {
             if (alive.expired()) return;
             lastStatus_ = text;
@@ -275,6 +279,66 @@ void ForgeAudioProcessor::generate(const juce::String& prompt, bool editCurrent)
         });
 }
 
+juce::String ForgeAudioProcessor::promptForCurrent() const {
+    for (const auto& entry : library_.entries())
+        if (entry.id == currentId_) return entry.prompt;
+    return {};
+}
+
+juce::String ForgeAudioProcessor::referenceFileFilter() {
+    return "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3";
+}
+
+bool ForgeAudioProcessor::loadReference(const juce::File& file, juce::String& error) {
+    error = {};
+    if (!file.existsAsFile()) { error = "That file no longer exists."; return false; }
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+
+    std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
+    if (reader == nullptr) {
+        error = "Could not read " + file.getFileExtension().toUpperCase()
+              + " - try WAV, AIFF, FLAC, OGG or MP3.";
+        return false;
+    }
+    if (reader->lengthInSamples <= 0 || reader->numChannels == 0) {
+        error = "That file contains no audio.";
+        return false;
+    }
+
+    // Only ever decode the span we analyse. Someone will drop a full album in
+    // at some point and it must not try to hold it in memory.
+    const auto wanted = static_cast<juce::int64>(reader->sampleRate * audio::kMaxReferenceSeconds);
+    const int  frames = static_cast<int>(juce::jmin(reader->lengthInSamples, wanted));
+    const int  chans  = static_cast<int>(juce::jmin<unsigned>(reader->numChannels, 2u));
+
+    juce::AudioBuffer<float> buffer(chans, frames);
+    buffer.clear();
+    if (!reader->read(&buffer, 0, frames, 0, true, chans > 1)) {
+        error = "Could not decode that file.";
+        return false;
+    }
+
+    const auto analysed = audio::analyse(buffer.getArrayOfReadPointers(), chans, frames,
+                                         reader->sampleRate);
+    if (!analysed.valid) {
+        error = juce::String(analysed.problem);
+        return false;
+    }
+
+    reference_     = analysed;
+    referenceName_ = file.getFileName();
+    notifyListeners();
+    return true;
+}
+
+void ForgeAudioProcessor::clearReference() {
+    reference_     = {};
+    referenceName_ = {};
+    notifyListeners();
+}
+
 void ForgeAudioProcessor::cancelGeneration() {
     session_.cancel();
     lastStatus_ = "Cancelled.";
@@ -295,6 +359,58 @@ void ForgeAudioProcessor::loadInstrument(const juce::String& id) {
     lastStatus_  = "Loaded " + entry->name + ".";
     lastRepairs_ = {};
     adoptInstrument(entry->instrument, std::move(graph), id);
+}
+
+void ForgeAudioProcessor::setNodeSetting(const juce::String& nodeId,
+                                         const juce::String& setting,
+                                         const nlohmann::json& value) {
+    if (!hasCurrent_) return;
+    ir::NodeSpec* node = current_.findNode(nodeId.toStdString());
+    if (node == nullptr) return;
+
+    if (!node->settings.is_object()) node->settings = nlohmann::json::object();
+    if (node->settings[setting.toStdString()] == value) return;
+    node->settings[setting.toStdString()] = value;
+
+    // Settings are construction-time, so this is a genuine rebuild rather than
+    // a parameter change. Keep the current knob positions: bind() would reset
+    // them to the instrument defaults, which would be infuriating mid-tweak.
+    ir::IrReport report;
+    auto graph = GraphBuilder::build(current_, preparedSampleRate_, report);
+    if (graph == nullptr) return;
+
+    pool_.pushTo(*graph);
+    crossfadeGain_ = 0.0f;
+    publisher_.publish(std::move(graph));
+
+    // Persist the edit so it survives a reload.
+    if (currentId_.isNotEmpty()) library_.updateInstrument(currentId_, current_);
+    notifyListeners();
+}
+
+void ForgeAudioProcessor::loadFullArchitecture() {
+    auto inst = arch::buildFullArchitecture();
+    inst.name = "Full Architecture";
+
+    ir::IrReport report;
+    ir::repair(inst, report);
+    ir::applySafety(inst, report, config_.cpuBudget);
+
+    ir::IrReport buildReport;
+    auto graph = GraphBuilder::build(inst, preparedSampleRate_, buildReport);
+    if (graph == nullptr) {
+        lastStatus_ = "Could not build the full architecture.";
+        notifyListeners();
+        return;
+    }
+
+    const auto id = library_.add(inst, "Full architecture", false);
+    lastStatus_  = "Loaded the full architecture ("
+                 + juce::String(static_cast<int>(inst.params.size() + inst.switches.size()
+                                                 + inst.macros.size()))
+                 + " controls).";
+    lastRepairs_ = {};
+    adoptInstrument(inst, std::move(graph), id);
 }
 
 void ForgeAudioProcessor::startNewInstrument() {

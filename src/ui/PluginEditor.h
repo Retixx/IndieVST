@@ -31,7 +31,9 @@ private:
     void forgeProgress(const juce::String&) override;
     void timerCallback() override;
 
+    void applyAspectForScreen();
     void refreshInstrumentMenu();
+    juce::String describeCurrentInstrument() const;
     void showMainMenu();
     void showSettings();
     void showRenameDialog();
@@ -54,6 +56,7 @@ private:
     bool              updatingMenu_ = false;
     juce::String      progressText_;
     float             meterLevel_ = 0.0f;
+    bool              aspectLocked_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ForgeEditor)
 };

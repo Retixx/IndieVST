@@ -48,6 +48,12 @@ struct ScopePlan {
     /// Base to use when a parameter is modulated but has no knob bound to it.
     /// Equal to paramDefaultNorm except where ParamDesc::hasModBase is set.
     std::vector<float>    paramModBaseNorm;
+    /// 1 where modulation multiplies instead of adding AND at least one route
+    /// actually targets the parameter. See ParamDesc::multiplicativeMod.
+    std::vector<char>     paramMulMod;
+    /// What the modulation accumulator starts each block at: 0 for the additive
+    /// majority, 1 for the multiplicative few. Copied rather than filled.
+    std::vector<float>    modAccumInit;
     /// Recomputed once per control block from the exposed parameters and
     /// macros. Shared by every voice, because exposed parameters are global.
     std::vector<float>    baseNorm;
@@ -197,6 +203,9 @@ private:
     std::vector<float>                   globalInBuf_, globalOutBuf_, voiceBus_;
     std::vector<float>                   globalSrcValue_, globalModAccum_;
     std::vector<float>                   exposedNorm_, macroNorm_;
+    /// Where each macro was left by the sound designer. A macro contributes
+    /// nothing at that position - see resolveBaseParams.
+    std::vector<float>                   macroDefaultNorm_;
 
     float    pitchBend_ = 0.0f, modWheel_ = 0.0f, aftertouch_ = 0.0f;
     bool     sustain_   = false;

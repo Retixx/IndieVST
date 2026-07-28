@@ -2,6 +2,8 @@
 
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <string>
+
 namespace forge {
 
 /// Near-black chrome with grey structure and white text, so the accent colour
@@ -14,6 +16,23 @@ public:
 
     void setAccent(juce::Colour accent);
     juce::Colour accent() const { return accent_; }
+
+    /// The instrument's visual language, chosen by the model.
+    ///
+    /// Colour alone is not enough. A cold technical instrument and a warm
+    /// groovy one rendered with identical geometry read as the same product in
+    /// two palettes - which is exactly the complaint this answers. Style
+    /// changes the SHAPES: how blunt the pointer is, whether there are tick
+    /// marks at all, how thick the arc is, how much chrome sits around it.
+    enum class Style { Sharp, Soft, Vintage, Minimal };
+    void  setStyle(Style s) { style_ = s; }
+    Style style() const { return style_; }
+    static Style styleFromString(const std::string& name) {
+        if (name == "soft")    return Style::Soft;
+        if (name == "vintage") return Style::Vintage;
+        if (name == "minimal") return Style::Minimal;
+        return Style::Sharp;
+    }
 
     // Near-black base, greys for structure, near-white for content.
     static juce::Colour background()    { return juce::Colour(0xff0a0a0c); }
@@ -61,6 +80,7 @@ public:
     void fillTextEditorBackground(juce::Graphics&, int width, int height, juce::TextEditor&) override;
 
 private:
+    Style        style_ = Style::Sharp;
     juce::Colour accent_{0xffe4572e};
 };
 

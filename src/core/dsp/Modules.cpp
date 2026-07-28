@@ -396,6 +396,26 @@ public:
         // Envelopes advance at control rate. With kControlBlock = 16 that is a
         // 0.33 ms grid at 48 kHz, so even a 1 ms attack gets sampled properly.
         const float dt = static_cast<float>(a.numSamples) / static_cast<float>(sr_);
+
+        // THE GATE IS THE SOURCE OF TRUTH, not the noteOff() callback.
+        //
+        // Release used to depend entirely on a one-shot call arriving, and if
+        // it did not - for any reason at all - the envelope sat in sustain
+        // forever, held its voice forever, and the note never stopped. That is
+        // exactly what happened: `porcelain_pluck` would hold a voice
+        // indefinitely, and since a held voice is never handed back, polyphony
+        // leaked until the instrument stopped responding.
+        //
+        // The voice manager already maintains `gate` as per-block state, so
+        // reading it here makes the envelope self-correcting: whatever happens
+        // to the callback, an envelope whose gate is low WILL release, and one
+        // whose gate is high will not linger in release.
+        if (a.v != nullptr) {
+            const bool open = a.v->gate > 0.5f;
+            if (!open && (stage_ == Attack || stage_ == Decay || stage_ == Sustain))
+                stage_ = Release;
+        }
+
         switch (stage_) {
             case Attack: {
                 const float t = std::max(p(kAttack), 0.2f) * 0.001f;
@@ -1058,6 +1078,10 @@ ModuleManifest manifestVca() {
     // VCA and every note would be a rectangle.
     m.params[0].hasModBase = true;
     m.params[0].modBase    = 0.0f;
+    // And it has to be able to CLOSE again. Summed routes meant a second
+    // source - velocity, an LFO, anything unipolar - held the amplifier open
+    // for the rest of time; see ParamDesc::multiplicativeMod.
+    m.params[0].multiplicativeMod = true;
     m.factory = mk<Vca>();
     return m;
 }

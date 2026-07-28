@@ -37,6 +37,23 @@ void ForgeParameter::unassign() {
     assigned_.store(false, std::memory_order_release);
 }
 
+float ForgeParameter::engineeringValue() const noexcept {
+    return applyTaper(normalisedValue(),
+                      min_.load(std::memory_order_relaxed),
+                      max_.load(std::memory_order_relaxed),
+                      static_cast<Taper>(taper_.load(std::memory_order_relaxed)));
+}
+
+void ForgeParameter::setEngineeringValue(float engineering) {
+    const float norm = removeTaper(engineering,
+                                   min_.load(std::memory_order_relaxed),
+                                   max_.load(std::memory_order_relaxed),
+                                   static_cast<Taper>(taper_.load(std::memory_order_relaxed)));
+    beginChangeGesture();
+    setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, norm));
+    endChangeGesture();
+}
+
 juce::String ForgeParameter::getName(int maximumStringLength) const {
     const juce::String& n = displayName_.isNotEmpty() ? displayName_ : fallbackName_;
     return n.substring(0, maximumStringLength);
@@ -56,13 +73,15 @@ juce::String ForgeParameter::getText(float normalisedValue, int maximumStringLen
     // way to read the wrong number later.
     const float engineering = applyTaper(juce::jlimit(0.0f, 1.0f, normalisedValue), mn, mx, taper);
 
-    // Pick a sensible number of digits from the size of the range, so a cutoff
-    // reads "4200" and a resonance reads "0.35".
-    const float span = std::abs(mx - mn);
+    // Digits come from the VALUE, not the range. Deriving them from the range
+    // is what produced "901.246 ms" and "4879.46 Hz" - readings with more
+    // precision than anyone can dial in, on a control where the last two digits
+    // are noise. Nobody sets a release time to a thousandth of a millisecond.
+    const float magnitude = std::abs(engineering);
     int digits = 2;
-    if (span >= 1000.0f)     digits = 0;
-    else if (span >= 100.0f) digits = 1;
-    else if (span < 2.0f)    digits = 3;
+    if (unit_ == "%")            digits = 0;
+    else if (magnitude >= 100.0f) digits = 0;
+    else if (magnitude >= 10.0f)  digits = 1;
 
     return juce::String(engineering, digits).substring(0, maximumStringLength);
 }

@@ -24,6 +24,11 @@ struct RepairOptions {
 
     /// Enforce the MVP node/param/macro caps by dropping the overflow.
     bool enforceCaps = true;
+
+    /// Surface oscillator wave, filter mode and similar settings as selectors
+    /// when the model did not. Without this a generated instrument has no way
+    /// to switch from saw to square.
+    bool exposeSwitches = true;
 };
 
 /// Repairs in place. Always safe to call, including on a graph that already

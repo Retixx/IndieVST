@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Forge
+project(IndieVST
     VERSION 0.1.0
     DESCRIPTION "AI instrument generator VST3"
     LANGUAGES CXX)
@@ -22,6 +22,16 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 if(MSVC)
+    # Static C runtime, so a handed-out build needs nothing installed.
+    #
+    # Linked dynamically, both artefacts import MSVCP140.dll, VCRUNTIME140.dll
+    # and VCRUNTIME140_1.dll - the VC++ 2015-2022 Redistributable. A machine
+    # without it does not show an error: the VST3 simply fails to load and the
+    # host leaves it out of the plugin list, which reads as "your plugin is
+    # broken" rather than "install this first". Not a trade anyone wants to make
+    # when someone else is doing the installing.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
     add_compile_options(/W4 /permissive- /Zc:__cplusplus /MP /bigobj)
     # Flush-to-zero / denormals-are-zero friendly, but never fast-math:
     # the DSP relies on well-defined NaN/Inf behaviour for the safety scan.
@@ -50,6 +60,8 @@ add_library(forge_core STATIC
     src/core/dsp/Registry.cpp
     src/core/dsp/Modules.cpp
     src/core/dsp/ModulesFx.cpp
+    src/core/arch/Architecture.cpp
+    src/core/audio/ReferenceAnalysis.cpp
     src/core/dsp/AssetBaker.cpp
     src/core/dsp/GraphInstance.cpp
     src/core/dsp/GraphBuilder.cpp
@@ -61,6 +73,10 @@ add_library(forge_core STATIC
     src/core/llm/PromptBuilder.cpp
     src/core/llm/CannedLibrary.cpp
     src/core/llm/ResponseExtract.cpp
+    src/core/llm/JsonSalvage.cpp
+    src/core/llm/StreamAssembler.cpp
+    src/core/llm/Compliance.cpp
+    src/core/llm/InstrumentCorrection.cpp
 )
 
 target_include_directories(forge_core PUBLIC
@@ -98,7 +114,17 @@ if(FORGE_BUILD_PLUGIN)
     set(FORGE_COPY_ARGS)
     if(FORGE_VST3_COPY_DIR)
         list(APPEND FORGE_COPY_ARGS VST3_COPY_DIR "${FORGE_VST3_COPY_DIR}")
-        message(STATUS "Forge: VST3 will be installed to ${FORGE_VST3_COPY_DIR}")
+        message(STATUS "IndieVST: VST3 will be installed to ${FORGE_VST3_COPY_DIR}")
+
+        # Warn about the old artefact, loudly. A stale Forge.vst3 sitting beside
+        # the new IndieVST.vst3 loads perfectly well, and every change made
+        # since the rename looks like it silently failed to land.
+        if(EXISTS "${FORGE_VST3_COPY_DIR}/Forge.vst3")
+            message(WARNING
+                "A previous build installed Forge.vst3 at ${FORGE_VST3_COPY_DIR}. "
+                "It is NOT this plugin any more - delete it, or your host may keep "
+                "loading the old one and none of your changes will appear.")
+        endif()
     endif()
 
     FetchContent_Declare(JUCE
@@ -108,15 +134,22 @@ if(FORGE_BUILD_PLUGIN)
     )
     FetchContent_MakeAvailable(JUCE)
 
-    juce_add_plugin(Forge
+    juce_add_plugin(IndieVST
         COMPANY_NAME              "IndieVST"
         COMPANY_WEBSITE           "https://github.com/Retixx/IndieVST"
-        BUNDLE_ID                 "com.indievst.forge"
+        BUNDLE_ID                 "com.indievst.indievst"
         PLUGIN_MANUFACTURER_CODE  Ivst
         PLUGIN_CODE               Frg1
         FORMATS                   VST3 Standalone
-        PRODUCT_NAME              "Forge"
+        PRODUCT_NAME              "IndieVST"
         DESCRIPTION               "AI instrument generator"
+        # The TARGET is renamed too, not just PRODUCT_NAME.
+        #
+        # Renaming only the product left `Forge.vst3` and `Forge.exe` sitting in
+        # the build tree and in the VST3 folder next to the new `IndieVST`
+        # artefacts. Both loaded fine, so it was easy to keep launching the old
+        # one and conclude that none of the changes had landed - which is
+        # exactly what happened.
         IS_SYNTH                  TRUE
         NEEDS_MIDI_INPUT          TRUE
         NEEDS_MIDI_OUTPUT         FALSE
@@ -127,7 +160,7 @@ if(FORGE_BUILD_PLUGIN)
         ${FORGE_COPY_ARGS}
     )
 
-    target_sources(Forge PRIVATE
+    target_sources(IndieVST PRIVATE
         src/plugin/PluginProcessor.cpp
         src/plugin/ParameterPool.cpp
         src/plugin/GraphPublisher.cpp
@@ -136,6 +169,7 @@ if(FORGE_BUILD_PLUGIN)
         src/llm/HttpLlmProvider.cpp
         src/llm/GenerationSession.cpp
         src/ui/Fonts.cpp
+        src/ui/Visualisers.cpp
         src/ui/PluginEditor.cpp
         src/ui/ChatView.cpp
         src/ui/InstrumentView.cpp
@@ -144,7 +178,7 @@ if(FORGE_BUILD_PLUGIN)
         src/ui/ForgeLookAndFeel.cpp
     )
 
-    target_compile_definitions(Forge PUBLIC
+    target_compile_definitions(IndieVST PUBLIC
         JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
@@ -153,9 +187,14 @@ if(FORGE_BUILD_PLUGIN)
         JUCE_REPORT_APP_USAGE=0
         JUCE_STRICT_REFCOUNTEDPOINTER=1
         JUCE_MODAL_LOOPS_PERMITTED=0
+        # Reference recordings arrive as whatever the producer has on disk, and
+        # in practice that is very often an MP3 bounce. Without this JUCE's
+        # registerBasicFormats() silently omits the MP3 decoder and every mp3
+        # drop fails with "could not read".
+        JUCE_USE_MP3AUDIOFORMAT=1
     )
 
-    target_link_libraries(Forge
+    target_link_libraries(IndieVST
         PRIVATE
             forge_core
             # juce_audio_utils pulls in juce_audio_devices, which the Standalone
@@ -179,7 +218,7 @@ if(FORGE_BUILD_PLUGIN)
         "${CMAKE_CURRENT_SOURCE_DIR}/resources/fonts/InterSemiBold.ttf"
     )
     set_target_properties(ForgeResources PROPERTIES POSITION_INDEPENDENT_CODE ON)
-    target_link_libraries(Forge PRIVATE ForgeResources)
+    target_link_libraries(IndieVST PRIVATE ForgeResources)
 
     # NOTE: the offline fallback instruments are compiled into forge_core as
     # string literals (src/core/llm/CannedLibrary.cpp) rather than bundled as
@@ -198,6 +237,18 @@ if(FORGE_BUILD_TESTS)
         tests/main.cpp
         tests/test_validator.cpp
         tests/test_repair.cpp
+        tests/test_layout.cpp
+        tests/test_reference.cpp
+        tests/test_salvage.cpp
+        tests/test_stream.cpp
+        tests/test_compliance.cpp
+        tests/test_instruments.cpp
+        tests/test_orchestra.cpp
+        tests/test_capability.cpp
+        tests/test_correction.cpp
+        tests/test_string.cpp
+        tests/test_appearance.cpp
+        tests/test_guitar.cpp
         tests/test_dsp.cpp
         tests/test_graph.cpp
         tests/fuzz_ir.cpp

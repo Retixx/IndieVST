@@ -53,10 +53,12 @@ void ForgeLookAndFeel::setAccent(juce::Colour accent) {
 
 // --- knobs -----------------------------------------------------------------
 
-/// A moulded plastic knob with a single light source from the upper left, a
-/// bevelled rim, a recessed tick scale and a cut indicator - the vocabulary
-/// hardware-style plugin knobs (FLEX, Sylenth, Diva) actually use. Flat discs
-/// with a coloured arc read as a mock-up; the shading is what sells it.
+/// Modelled on FL Studio's stock dials: a flat slate cap with a soft vertical
+/// gradient, a thin recessed track, a restrained value arc and a short pointer.
+///
+/// The previous version had a glowing accent arc, a bloom pass and a tick
+/// scale - all of which read as decoration. Hardware dials are understated;
+/// the panel is meant to sit still while you work on it for eight hours.
 void ForgeLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int width, int height,
                                         float sliderPos, float rotaryStartAngle,
                                         float rotaryEndAngle, juce::Slider& slider) {
@@ -66,82 +68,115 @@ void ForgeLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int wid
     const float cx = outer.getCentreX(), cy = outer.getCentreY();
     const float radius = diameter * 0.5f;
     const float angle = rotaryStartAngle + sliderPos * (rotaryEndAngle - rotaryStartAngle);
-    const bool  on = slider.isEnabled();
+    const bool  on    = slider.isEnabled();
+    const bool  hot   = slider.isMouseOverOrDragging();
 
-    const float ring      = juce::jmax(2.0f, diameter * 0.075f);
-    const float arcRadius = radius - ring * 0.5f;
-    const float bodyR     = radius - ring * 1.55f;
-    const auto  body      = juce::Rectangle<float>(bodyR * 2.0f, bodyR * 2.0f)
-                                .withCentre({cx, cy});
+    // --- style ------------------------------------------------------------
+    //
+    // These four numbers are what make a teal utilitarian instrument and a warm
+    // Jamaican one genuinely different objects rather than the same geometry in
+    // two palettes.
+    const bool  sharp   = style_ == Style::Sharp;
+    const bool  soft    = style_ == Style::Soft;
+    const bool  vintage = style_ == Style::Vintage;
+    const bool  minimal = style_ == Style::Minimal;
 
-    // --- tick scale, recessed into the panel -------------------------------
-    {
-        const int ticks = 11;
+    const bool  wantTicks  = sharp || vintage;
+    const float ringScale  = soft ? 1.55f : (minimal ? 0.55f : 1.0f);
+    const float capScale   = soft ? 1.10f : (minimal ? 0.80f : (vintage ? 1.06f : 1.0f));
+    const float pointerW   = soft ? 1.45f : (minimal ? 0.60f : 1.0f);
+
+    const float ring      = juce::jmax(1.6f, diameter * 0.052f) * ringScale;
+    const float arcRadius = radius - ring * 0.5f - 0.5f;
+    const float bodyR     = (radius - ring * 2.3f) * capScale;
+    const auto  body      = juce::Rectangle<float>(bodyR * 2.0f, bodyR * 2.0f).withCentre({cx, cy});
+
+    const auto tint = slider.isColourSpecified(juce::Slider::rotarySliderFillColourId)
+                          ? slider.findColour(juce::Slider::rotarySliderFillColourId)
+                          : accent_;
+
+    // --- tick marks --------------------------------------------------------
+    // The thing every hardware synth has and every quick software knob skips.
+    // They give the eye a scale to read the pointer against, so a value is
+    // legible at a glance instead of needing the number underneath.
+    if (wantTicks && diameter > 34.0f) {
+        const int   ticks   = 11;
+        const float tickIn  = radius * 0.99f;
+        const float tickOut = radius * 1.10f;
         for (int i = 0; i < ticks; ++i) {
-            const float t = static_cast<float>(i) / static_cast<float>(ticks - 1);
-            const float a = rotaryStartAngle + t * (rotaryEndAngle - rotaryStartAngle);
+            const float t  = static_cast<float>(i) / (ticks - 1);
+            const float a  = rotaryStartAngle + t * (rotaryEndAngle - rotaryStartAngle);
             const float sn = std::sin(a), cs = -std::cos(a);
-            const float r0 = radius + 1.0f, r1 = radius + (i % 5 == 0 ? 3.2f : 2.0f);
-            g.setColour(t <= sliderPos + 1.0e-4f && on ? accent_.withAlpha(0.55f)
-                                                       : outline().brighter(0.15f));
-            g.drawLine(cx + sn * r0, cy + cs * r0, cx + sn * r1, cy + cs * r1, 1.0f);
+            const bool  major = (i == 0 || i == ticks - 1 || i == ticks / 2);
+            g.setColour(outline().withAlpha(major ? 0.85f : 0.42f));
+            g.drawLine(cx + sn * tickIn, cy + cs * tickIn,
+                       cx + sn * (major ? tickOut : tickOut - 1.5f),
+                       cy + cs * (major ? tickOut : tickOut - 1.5f),
+                       major ? 1.3f : 0.9f);
         }
     }
 
-    // --- value arc ---------------------------------------------------------
+    // --- recessed track ----------------------------------------------------
     juce::Path track;
     track.addCentredArc(cx, cy, arcRadius, arcRadius, 0.0f,
                         rotaryStartAngle, rotaryEndAngle, true);
-    g.setColour(juce::Colour(0xff08080a));
+    g.setColour(juce::Colour(0xff0e0e12));
     g.strokePath(track, juce::PathStrokeType(ring, juce::PathStrokeType::curved,
-                                             juce::PathStrokeType::butt));
+                                             juce::PathStrokeType::rounded));
 
-    if (sliderPos > 0.002f) {
+    // --- value arc ---------------------------------------------------------
+    if (sliderPos > 0.003f) {
         juce::Path value;
         value.addCentredArc(cx, cy, arcRadius, arcRadius, 0.0f, rotaryStartAngle, angle, true);
-        const auto arcColour = on ? accent_ : outlineBright();
-        g.setColour(arcColour.withAlpha(0.22f));
-        g.strokePath(value, juce::PathStrokeType(ring * 1.9f, juce::PathStrokeType::curved,
-                                                 juce::PathStrokeType::butt));   // bloom
-        g.setColour(arcColour);
+        const auto lit = on ? tint.withMultipliedSaturation(hot ? 0.95f : 0.68f)
+                                  .withMultipliedBrightness(hot ? 1.22f : 1.05f)
+                            : outlineBright();
+        // A soft bloom under the arc when the knob is live. Subtle - one pass,
+        // low alpha - because a glow on every knob is a toy, and a glow on the
+        // one you are touching is a product.
+        if (hot && on) {
+            g.setColour(lit.withAlpha(0.22f));
+            g.strokePath(value, juce::PathStrokeType(ring * 2.4f, juce::PathStrokeType::curved,
+                                                     juce::PathStrokeType::rounded));
+        }
+        g.setColour(lit);
         g.strokePath(value, juce::PathStrokeType(ring, juce::PathStrokeType::curved,
-                                                 juce::PathStrokeType::butt));
+                                                 juce::PathStrokeType::rounded));
     }
 
-    // --- contact shadow under the cap --------------------------------------
-    g.setColour(juce::Colours::black.withAlpha(0.45f));
-    g.fillEllipse(body.translated(0.0f, bodyR * 0.09f).expanded(1.2f));
+    // --- cap ---------------------------------------------------------------
+    // Contact shadow first, so the cap sits in the panel rather than on it.
+    g.setColour(juce::Colours::black.withAlpha(0.35f));
+    g.fillEllipse(body.translated(0.0f, juce::jmax(1.0f, bodyR * 0.07f)).expanded(0.8f));
 
-    // --- moulded body ------------------------------------------------------
-    juce::ColourGradient bodyGrad(juce::Colour(0xff43434c), cx - bodyR * 0.45f, cy - bodyR * 0.6f,
-                                  juce::Colour(0xff141418), cx + bodyR * 0.35f, cy + bodyR * 0.85f,
-                                  true);
-    bodyGrad.addColour(0.55, juce::Colour(0xff26262d));
-    g.setGradientFill(bodyGrad);
+    const juce::Colour capTop = vintage ? juce::Colour(0xffd9cdb4)
+                              : soft    ? juce::Colour(0xff4a4038)
+                                        : juce::Colour(0xff40444f);
+    const juce::Colour capBot = vintage ? juce::Colour(0xffa8927a)
+                              : soft    ? juce::Colour(0xff261f1a)
+                                        : juce::Colour(0xff20232a);
+    juce::ColourGradient cap(capTop, cx, cy - bodyR, capBot, cx, cy + bodyR, false);
+    cap.addColour(0.55, capTop.interpolatedWith(capBot, 0.55f));
+    g.setGradientFill(cap);
     g.fillEllipse(body);
 
-    // Rim: light along the top edge, dark along the bottom, so the cap reads
-    // as a raised cylinder rather than a printed circle.
-    juce::ColourGradient rimGrad(juce::Colours::white.withAlpha(0.22f), cx, cy - bodyR,
-                                 juce::Colours::black.withAlpha(0.55f), cx, cy + bodyR, false);
-    g.setGradientFill(rimGrad);
-    g.drawEllipse(body.reduced(0.5f), 1.3f);
+    g.setColour(juce::Colour(0xff0b0b0f));
+    g.drawEllipse(body.reduced(0.5f), 1.0f);
+    g.setColour(juce::Colours::white.withAlpha(hot ? 0.13f : 0.07f));
+    g.drawEllipse(body.reduced(1.4f), 1.0f);
 
-    // Inner shading, tightening the highlight toward the top-left.
-    g.setColour(juce::Colours::white.withAlpha(0.05f));
-    g.drawEllipse(body.reduced(bodyR * 0.22f), 1.0f);
-
-    // --- indicator ---------------------------------------------------------
+    // --- pointer -----------------------------------------------------------
     const float sn = std::sin(angle), cs = -std::cos(angle);
-    const float tipR  = bodyR * 0.86f;
-    const float baseR = bodyR * 0.30f;
-    const float w     = juce::jmax(1.6f, bodyR * 0.115f);
+    const float tipR  = bodyR * 0.82f;
+    const float baseR = bodyR * 0.20f;
+    const float w     = juce::jmax(1.8f, bodyR * 0.14f) * pointerW;
 
-    // Cut shadow first, offset a hair, then the lit face on top.
-    g.setColour(juce::Colours::black.withAlpha(0.6f));
-    g.drawLine(cx + sn * baseR + 0.7f, cy + cs * baseR + 0.9f,
-               cx + sn * tipR + 0.7f,  cy + cs * tipR + 0.9f, w);
-    g.setColour(on ? juce::Colour(0xfff4f4f7) : textDim());
+    g.setColour(juce::Colours::black.withAlpha(0.45f));
+    g.drawLine(cx + sn * baseR, cy + cs * baseR + 1.0f,
+               cx + sn * tipR,  cy + cs * tipR + 1.0f, w);
+    g.setColour(!on ? textDim()
+                    : vintage ? juce::Colour(0xff20180f)
+                              : (hot ? juce::Colours::white : juce::Colour(0xffe6e8ee)));
     g.drawLine(cx + sn * baseR, cy + cs * baseR, cx + sn * tipR, cy + cs * tipR, w);
 }
 

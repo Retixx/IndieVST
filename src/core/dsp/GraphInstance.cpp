@@ -52,7 +52,8 @@ void GraphInstance::reset() noexcept {
         std::fill(v.inBuf.begin(), v.inBuf.end(), 0.0f);
         std::fill(v.outBuf.begin(), v.outBuf.end(), 0.0f);
         std::fill(v.srcValue.begin(), v.srcValue.end(), 0.0f);
-        std::fill(v.modAccum.begin(), v.modAccum.end(), 0.0f);
+        std::copy(voicePlan_.modAccumInit.begin(), voicePlan_.modAccumInit.end(),
+                  v.modAccum.begin());
         v.active = false; v.held = false; v.note = -1;
         v.fade = 1.0f; v.fadeInc = 0.0f; v.quietBlocks = 0;
     }
@@ -86,10 +87,26 @@ void GraphInstance::resolveBaseParams() noexcept {
 
     // Macros offset exposed parameters in the exposed parameter's own
     // normalised domain, then everything is clamped once.
+    //
+    // The offset is measured FROM THE MACRO'S DEFAULT POSITION, so a macro that
+    // nobody has touched contributes exactly nothing. Without that subtraction
+    // the stock macro row silently rewrote every instrument ever generated: the
+    // "Body" macro sits at 0.4 with a +0.5 route to the sub oscillator, so
+    // every patch got a sub-octave at 0.2 no matter what it asked for - loud
+    // enough to dominate a plucked string and make it sound an octave low. The
+    // same went for Space adding reverb to sounds the model had deliberately
+    // kept dry, and Drive adding grit to clean ones.
+    //
+    // It also made the macros feel dead. Half their travel was spent undoing an
+    // offset that should never have been applied, and the parameters they moved
+    // were already sitting near the top of their range.
     std::copy(exposedNorm_.begin(), exposedNorm_.end(), effExposed_.begin());
     for (const auto& mr : macroRoutes_) {
-        const float m = macroNorm_[static_cast<size_t>(mr.macroIndex)];
-        effExposed_[static_cast<size_t>(mr.exposedIndex)] += mr.depth * shapeMod(m, mr.curve);
+        const size_t mi = static_cast<size_t>(mr.macroIndex);
+        const float  now  = shapeMod(macroNorm_[mi], mr.curve);
+        const float  rest = mi < macroDefaultNorm_.size()
+                              ? shapeMod(macroDefaultNorm_[mi], mr.curve) : 0.0f;
+        effExposed_[static_cast<size_t>(mr.exposedIndex)] += mr.depth * (now - rest);
     }
     for (auto& e : effExposed_) e = clamp01(e);
 
@@ -105,19 +122,39 @@ void GraphInstance::resolveBaseParams() noexcept {
     }
 }
 
+namespace {
+
+/// One route's contribution to a parameter whose modulation multiplies.
+///
+/// Unipolar sources scale between (1 - depth) and 1, so an envelope at full
+/// depth IS the envelope and everything else can only ever pull the level
+/// down. Bipolar sources swing around unity, which is what tremolo means.
+inline float multiplicativeFactor(float shaped, float depth, bool bipolar) noexcept {
+    return clamp01(1.0f + depth * (bipolar ? shaped : shaped - 1.0f));
+}
+
+} // namespace
+
 void GraphInstance::resolveVoiceMod(Voice& v) noexcept {
-    std::fill(v.modAccum.begin(), v.modAccum.end(), 0.0f);
+    std::copy(voicePlan_.modAccumInit.begin(), voicePlan_.modAccumInit.end(),
+              v.modAccum.begin());
     for (const auto& r : modRoutes_) {
         if (r.dstGlobal) continue;
         float s = r.srcGlobal ? globalSrcValue_[static_cast<size_t>(r.srcPlanIndex)]
                               : v.srcValue[static_cast<size_t>(r.srcPlanIndex)];
         if (r.bipolar) s = s * 2.0f - 1.0f;
-        v.modAccum[static_cast<size_t>(r.dstFlatParam)] += r.depth * shapeMod(s, r.curve);
+        const size_t f = static_cast<size_t>(r.dstFlatParam);
+        const float shaped = shapeMod(s, r.curve);
+        if (voicePlan_.paramMulMod[f])
+            v.modAccum[f] *= multiplicativeFactor(shaped, r.depth, r.bipolar);
+        else
+            v.modAccum[f] += r.depth * shaped;
     }
 }
 
 void GraphInstance::resolveGlobalMod() noexcept {
-    std::fill(globalModAccum_.begin(), globalModAccum_.end(), 0.0f);
+    std::copy(globalPlan_.modAccumInit.begin(), globalPlan_.modAccumInit.end(),
+              globalModAccum_.begin());
     for (const auto& r : modRoutes_) {
         if (!r.dstGlobal) continue;
         // Voice-scope sources cannot reach global targets; the validator
@@ -125,7 +162,12 @@ void GraphInstance::resolveGlobalMod() noexcept {
         if (!r.srcGlobal) continue;
         float s = globalSrcValue_[static_cast<size_t>(r.srcPlanIndex)];
         if (r.bipolar) s = s * 2.0f - 1.0f;
-        globalModAccum_[static_cast<size_t>(r.dstFlatParam)] += r.depth * shapeMod(s, r.curve);
+        const size_t f = static_cast<size_t>(r.dstFlatParam);
+        const float shaped = shapeMod(s, r.curve);
+        if (globalPlan_.paramMulMod[f])
+            globalModAccum_[f] *= multiplicativeFactor(shaped, r.depth, r.bipolar);
+        else
+            globalModAccum_[f] += r.depth * shaped;
     }
 }
 
@@ -162,7 +204,9 @@ void GraphInstance::renderVoice(Voice& v, int numSamples) noexcept {
         Module* mod = v.modules[i].get();
         for (int pi = 0; pi < pn.numParams; ++pi) {
             const size_t f = static_cast<size_t>(pn.paramOffset + pi);
-            const float norm = clamp01(voicePlan_.baseNorm[f] + v.modAccum[f]);
+            const float norm = voicePlan_.paramMulMod[f]
+                                 ? clamp01(voicePlan_.baseNorm[f] * v.modAccum[f])
+                                 : clamp01(voicePlan_.baseNorm[f] + v.modAccum[f]);
             mod->setParam(pi, applyTaper(norm, voicePlan_.paramMin[f], voicePlan_.paramMax[f],
                                          voicePlan_.paramTaper[f]));
         }
@@ -205,7 +249,9 @@ void GraphInstance::renderGlobal(int numSamples) noexcept {
         Module* mod = globalModules_[i].get();
         for (int pi = 0; pi < pn.numParams; ++pi) {
             const size_t f = static_cast<size_t>(pn.paramOffset + pi);
-            const float norm = clamp01(globalPlan_.baseNorm[f] + globalModAccum_[f]);
+            const float norm = globalPlan_.paramMulMod[f]
+                                 ? clamp01(globalPlan_.baseNorm[f] * globalModAccum_[f])
+                                 : clamp01(globalPlan_.baseNorm[f] + globalModAccum_[f]);
             mod->setParam(pi, applyTaper(norm, globalPlan_.paramMin[f], globalPlan_.paramMax[f],
                                          globalPlan_.paramTaper[f]));
         }

@@ -313,6 +313,7 @@ bool fromJson(const nlohmann::json& j, Instrument& out, IrReport& report) {
             ps.taper   = taper(p, "taper", Taper::Linear);
             ps.control = str(p, "control", "knob");
             ps.group   = str(p, "group", "General");
+            ps.panel   = str(p, "panel", "");
 
             if (const auto* binds = arrayAt(p, "bind")) {
                 for (const auto& b : *binds) {
@@ -331,6 +332,22 @@ bool fromJson(const nlohmann::json& j, Instrument& out, IrReport& report) {
                 }
             }
             out.params.push_back(std::move(ps));
+        }
+    }
+
+    // --- switches (settings exposed as UI controls) ---
+    if (const auto* arr = arrayAt(j, "switches")) {
+        for (size_t i = 0; i < arr->size(); ++i) {
+            const auto& s = (*arr)[i];
+            if (!s.is_object()) { report.error(idx("switches", i), "Switch must be an object."); continue; }
+            SwitchSpec sw;
+            sw.id      = str(s, "id");
+            sw.label   = str(s, "label", sw.id);
+            sw.node    = str(s, "node");
+            sw.setting = str(s, "setting");
+            sw.group   = str(s, "group", "General");
+            sw.panel   = str(s, "panel", "");
+            if (!sw.node.empty() && !sw.setting.empty()) out.switches.push_back(std::move(sw));
         }
     }
 
@@ -376,6 +393,14 @@ bool fromJson(const nlohmann::json& j, Instrument& out, IrReport& report) {
                 out.ui.sections.push_back(std::move(sec));
             }
         }
+        if (auto pa = u.find("panel_accent"); pa != u.end() && pa->is_object())
+            for (auto it2 = pa->begin(); it2 != pa->end(); ++it2)
+                if (it2.value().is_string())
+                    out.ui.panelAccent[it2.key()] = it2.value().get<std::string>();
+        out.ui.style = str(u, "style", out.ui.style);
+        if (const auto* feat = arrayAt(u, "featured"))
+            for (const auto& v : *feat)
+                if (v.is_string()) out.ui.featuredPanels.push_back(v.get<std::string>());
         if (const auto* mr = arrayAt(u, "macro_row"))
             for (const auto& v : *mr)
                 if (v.is_string()) out.ui.macroRow.push_back(v.get<std::string>());
@@ -445,9 +470,15 @@ nlohmann::json toJson(const Instrument& inst) {
         params.push_back({{"id", p.id}, {"label", p.label}, {"unit", p.unit},
                           {"min", p.min}, {"max", p.max}, {"default", p.def},
                           {"taper", toString(p.taper)}, {"control", p.control},
-                          {"group", p.group}, {"bind", binds}});
+                          {"group", p.group}, {"panel", p.panel}, {"bind", binds}});
     }
     j["params"] = params;
+
+    json switches = json::array();
+    for (const auto& s : inst.switches)
+        switches.push_back({{"id", s.id}, {"label", s.label}, {"node", s.node},
+                            {"setting", s.setting}, {"group", s.group}, {"panel", s.panel}});
+    if (!switches.empty()) j["switches"] = switches;
 
     json macros = json::array();
     for (const auto& m : inst.macros) {
@@ -463,6 +494,9 @@ nlohmann::json toJson(const Instrument& inst) {
         sections.push_back({{"title", s.title}, {"params", s.params}});
     j["ui"] = {{"theme", {{"accent", inst.ui.accent}, {"mood", inst.ui.mood}}},
                {"sections", sections},
+               {"panel_accent", inst.ui.panelAccent},
+               {"featured", inst.ui.featuredPanels},
+               {"style", inst.ui.style},
                {"macro_row", inst.ui.macroRow}};
 
     return j;

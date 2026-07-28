@@ -125,6 +125,23 @@ struct ParamDesc {
     /// bound to it uses `modBase` as its base instead of `def`.
     bool  hasModBase = false;
     float modBase    = 0.0f;
+
+    /// Modulation SCALES this parameter instead of offsetting it.
+    ///
+    /// The other half of the same problem, and it went unnoticed for far
+    /// longer. An amplitude VCA whose routes are summed cannot be closed by any
+    /// one of them: velocity at depth 0.35 adds a permanent floor of 0.35 that
+    /// the amplitude envelope has no way to remove, so the note never ends.
+    /// Every offline instrument, and every model-authored one that took the
+    /// prompt's advice to route m_vel to amp.gain, sustained forever - which is
+    /// exactly what "the guitar sounds like an organ" means.
+    ///
+    /// Where this is set, each route contributes a factor of
+    /// `1 + depth * (source - 1)` for a unipolar source and `1 + depth *
+    /// source` for a bipolar one, and the factors multiply. An envelope at
+    /// depth 1.0 is then exactly the envelope, velocity becomes a scaling, and
+    /// zero stays reachable no matter what else is routed in.
+    bool  multiplicativeMod = false;
 };
 
 struct SettingDesc {

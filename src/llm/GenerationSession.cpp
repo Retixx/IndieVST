@@ -1,9 +1,12 @@
 #include "llm/GenerationSession.h"
 
+#include "core/arch/Architecture.h"
 #include "core/dsp/GraphBuilder.h"
 #include "core/ir/IrRepair.h"
 #include "core/ir/IrSafety.h"
 #include "core/ir/IrValidator.h"
+#include "core/llm/Compliance.h"
+#include "core/llm/InstrumentCorrection.h"
 #include "core/llm/PromptBuilder.h"
 #include "llm/HttpLlmProvider.h"
 
@@ -62,7 +65,7 @@ juce::String writeGenerationLog(const juce::String& prompt,
 class GenerationSession::Job final : public juce::ThreadPoolJob {
 public:
     Job(ForgeConfig config, double sampleRate,
-        juce::String prompt, juce::String currentIr,
+        juce::String prompt, juce::String currentIr, juce::String referenceText,
         ProgressFn onProgress, CompleteFn onComplete,
         std::shared_ptr<std::atomic<bool>> cancelFlag,
         std::atomic<bool>* runningFlag)
@@ -71,6 +74,7 @@ public:
           sampleRate_(sampleRate),
           prompt_(std::move(prompt)),
           currentIr_(std::move(currentIr)),
+          referenceText_(std::move(referenceText)),
           onProgress_(std::move(onProgress)),
           onComplete_(std::move(onComplete)),
           cancelFlag_(std::move(cancelFlag)),
@@ -136,8 +140,17 @@ private:
         }
         transportFailure_ = false;
         rawOut = response.irJson;
+        if (!response.salvageNote.empty()) salvageNote_ = response.salvageNote;
 
-        if (!ir::parse(response.irJson, inst, errors)) return false;
+        // Patch mode: the model fills in the fixed architecture rather than
+        // inventing a graph. This is what makes a generated instrument arrive
+        // with its full control surface instead of the dozen knobs a
+        // from-scratch graph tends to produce.
+        nlohmann::json patch;
+        if (!ir::parseJsonSafely(response.irJson, patch, errors)) return false;
+
+        inst = arch::buildFullArchitecture();
+        if (!arch::applyPatch(inst, patch, errors)) return false;
 
         ir::repair(inst, repairs);
         if (!ir::applySafety(inst, repairs, config_.cpuBudget)) {
@@ -154,19 +167,70 @@ private:
         progress("Designing...");
 
         auto provider = llm::makeProvider(config_);
-        const auto promptSpec = llm::buildGenerationPrompt(prompt_.toStdString(),
-                                                           currentIr_.toStdString());
+        const auto promptSpec = llm::buildPatchPrompt(prompt_.toStdString(),
+                                                      currentIr_.toStdString(),
+                                                      referenceText_.toStdString());
 
         llm::GenerationRequest request;
         request.systemPrompt = promptSpec.system;
         request.userMessage  = promptSpec.user;
         request.temperature  = config_.temperature;
         request.timeoutMs    = config_.timeoutMs;
+        // A full patch is values for ~130 controls plus layout, matrix,
+        // wavetable and references. Headroom here is far cheaper than a
+        // response that stops mid-object.
+        request.maxTokens    = 16000;
 
         ir::Instrument inst;
         ir::IrReport   errors, repairReport;
         std::string    raw;
         bool valid = attempt(*provider, request, inst, errors, repairReport, out, raw);
+
+        // --- retry when explicit requests were not honoured -------------------
+        //
+        // A long brief is a list of promises. A model that satisfies most of a
+        // list and then narrates all of it will pass unnoticed every time
+        // unless something actually checks - which is how a request for four
+        // named macros, glide and three mod-wheel mappings came back with none
+        // of them and a description claiming all three.
+        if (valid && !transportFailure_ && !cancelled()) {
+            auto compliance = llm::check(prompt_.toStdString(), inst);
+            if (!compliance.allMet() && config_.maxRetries > 0) {
+                progress("Checking your requests...");
+                request.correctionFeedback = compliance.toModelFeedback();
+                request.previousAttempt    = raw;
+
+                ir::Instrument retryInst;
+                ir::IrReport   retryErrors, retryRepairs;
+                std::string    retryRaw;
+                if (attempt(*provider, request, retryInst, retryErrors, retryRepairs,
+                            out, retryRaw)) {
+                    const auto after = llm::check(prompt_.toStdString(), retryInst);
+                    // Keep the retry only if it genuinely did better. A second
+                    // pass that fixes two things and breaks three is not an
+                    // improvement.
+                    if (after.unmetCount() < compliance.unmetCount()) {
+                        inst         = std::move(retryInst);
+                        repairReport = retryRepairs;
+                        raw          = retryRaw;
+                        compliance   = after;
+                    }
+                }
+                request.correctionFeedback.clear();
+            }
+            // Last line of defence. Asking nicely, checking, and sending it
+            // back are all requests; this is the guarantee. If the musician
+            // named a real instrument and the patch still is not built that
+            // way, build it that way - the DSP knowledge is ours, and "a
+            // plucked string is a physical model, not a sawtooth" is not a
+            // matter of taste.
+            if (llm::enforceInstrumentFamily(inst, prompt_.toStdString(), repairReport)) {
+                ir::repair(inst, repairReport);
+                ir::applySafety(inst, repairReport, config_.cpuBudget);
+                compliance = llm::check(prompt_.toStdString(), inst);
+            }
+            complianceSummary_ = juce::String(compliance.toUserSummary());
+        }
 
         // --- retry with the validator's own error list -----------------------
         for (int retry = 0; !valid && !transportFailure_
@@ -191,31 +255,30 @@ private:
                                              valid ? "ok" : "failed validation");
         }
 
-        // --- last resort: the offline library --------------------------------
+        // --- last resort ------------------------------------------------------
+        //
+        // NOT the canned library. Those are hand-authored little graphs with a
+        // dozen knobs, and dropping one on screen after a failed generation is
+        // how a pitch ends up showing a page with three knobs floating in it.
+        // The fallback is the FULL architecture with a deterministic patch read
+        // off the prompt: it is always complete, always laid out, and always
+        // looks like an instrument - it is just not a bespoke one.
         if (!valid) {
             progress("Falling back...");
-            llm::CannedProvider canned;
-            llm::GenerationRequest cannedRequest = request;
-            cannedRequest.correctionFeedback.clear();
-            cannedRequest.userMessage = prompt_.toStdString();
+            ir::Instrument fb = arch::buildFullArchitecture();
+            ir::IrReport   fbReport;
+            arch::applyPatch(fb, arch::heuristicPatch(prompt_.toStdString()), fbReport);
+            ir::repair(fb, fbReport);
+            ir::applySafety(fb, fbReport, config_.cpuBudget);
 
-            const auto fallback = canned.generate(cannedRequest, [this] { return cancelled(); });
-            if (fallback.ok) {
-                ir::Instrument fb;
-                ir::IrReport   fbReport;
-                if (ir::parse(fallback.irJson, fb, fbReport)) {
-                    ir::repair(fb, fbReport);
-                    ir::applySafety(fb, fbReport, config_.cpuBudget);
-                    ir::IrReport check;
-                    if (ir::validate(fb, check)) {
-                        inst = std::move(fb);
-                        out.usedFallback = true;
-                        const juce::String why = humaniseErrors(errors);
-                        out.message = why.isEmpty()
-                            ? "I had trouble with that one - here's a starting point you can edit."
-                            : "Fell back: " + why;
-                    }
-                }
+            ir::IrReport check;
+            if (ir::validate(fb, check)) {
+                inst = std::move(fb);
+                out.usedFallback = true;
+                const juce::String why = humaniseErrors(errors);
+                out.message = why.isEmpty()
+                    ? "I had trouble with that one - here is a full instrument you can edit."
+                    : "Fell back: " + why;
             }
             if (!out.usedFallback) {
                 out.message = "Generation failed: " + humaniseErrors(errors);
@@ -240,14 +303,21 @@ private:
         out.repairSummary = juce::String(repairReport.toUserSummary());
         if (out.message.isEmpty()) {
             out.message = out.usedFallback
-                ? "Loaded from the offline library."
+                ? "Built without the model - a full instrument you can edit."
                 : "Ready.";
         }
+        // Say plainly how much of the brief was actually delivered. Silence
+        // here is what let an instrument ship claiming features it never had.
+        if (complianceSummary_.isNotEmpty())
+            out.message << "  " << complianceSummary_ << ".";
+        if (salvageNote_.isNotEmpty())
+            out.message << "  " << salvageNote_;
     }
 
     ForgeConfig  config_;
     double       sampleRate_;
-    juce::String prompt_, currentIr_;
+    juce::String prompt_, currentIr_, referenceText_;
+    juce::String salvageNote_, complianceSummary_;
     ProgressFn   onProgress_;
     CompleteFn   onComplete_;
     bool transportFailure_ = false;
@@ -268,6 +338,7 @@ void GenerationSession::start(const ForgeConfig& config,
                               double sampleRate,
                               const juce::String& prompt,
                               const juce::String& currentIrJson,
+                              const juce::String& referenceText,
                               ProgressFn onProgress,
                               CompleteFn onComplete) {
     cancel();
@@ -276,7 +347,7 @@ void GenerationSession::start(const ForgeConfig& config,
     cancelFlag_ = std::make_shared<std::atomic<bool>>(false);
     running_.store(true, std::memory_order_release);
 
-    pool_.addJob(new Job(config, sampleRate, prompt, currentIrJson,
+    pool_.addJob(new Job(config, sampleRate, prompt, currentIrJson, referenceText,
                          std::move(onProgress), std::move(onComplete),
                          cancelFlag_, &running_),
                  true);

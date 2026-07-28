@@ -273,8 +273,8 @@ bool validate(const Instrument& inst, IrReport& report, ValidationResult* result
     }
 
     // MVP complexity caps (SPEC 5.2).
-    if (oscCount > 6)    report.error("nodes", "At most 6 voice-scope source modules are allowed.");
-    if (filterCount > 4) report.error("nodes", "At most 4 filter modules are allowed.");
+    if (oscCount > 8)    report.error("nodes", "At most 8 voice-scope source modules are allowed.");
+    if (filterCount > 6) report.error("nodes", "At most 6 filter modules are allowed.");
     if (reverbCount > 2) report.error("nodes", "At most 2 fx.reverb modules are allowed.");
     if (delayCount > 3)  report.error("nodes", "At most 3 fx.delay modules are allowed.");
 
@@ -407,6 +407,44 @@ bool validate(const Instrument& inst, IrReport& report, ValidationResult* result
                 report.error(bpath + ".param", "Module type '" + node->type
                                                + "' has no parameter '" + bind.param + "'.");
         }
+    }
+
+    // --- switches ---
+    std::unordered_set<std::string> switchIds;
+    for (size_t i = 0; i < inst.switches.size(); ++i) {
+        const auto& s = inst.switches[i];
+        const std::string path = at("switches", i);
+
+        if (!isValidIdentifier(s.id))
+            report.error(path + ".id", "Switch id '" + s.id + "' must match ^[a-z][a-z0-9_]{0,31}$.");
+        else if (!switchIds.insert(s.id).second)
+            report.error(path + ".id", "Duplicate switch id '" + s.id + "'.");
+
+        const NodeSpec* node = inst.findNode(s.node);
+        if (node == nullptr) {
+            report.error(path + ".node", "Unknown node id '" + s.node + "'.");
+            continue;
+        }
+        const ModuleManifest* man = reg.find(node->type);
+        if (man == nullptr) continue;
+        const SettingDesc* desc = man->findSetting(s.setting);
+        if (desc == nullptr) {
+            report.error(path + ".setting", "Module type '" + node->type
+                                            + "' has no setting '" + s.setting + "'.");
+            continue;
+        }
+        // Float settings are selectable too. They render as a curated list of
+        // values rather than a free range - which is what makes an FM ratio of
+        // 2.41 reachable, and inharmonic ratios are the only way to build a
+        // bell or a glockenspiel.
+        const bool selectable = desc->type == SettingDesc::Type::Enum
+                             || desc->type == SettingDesc::Type::Int
+                             || desc->type == SettingDesc::Type::Bool
+                             || desc->type == SettingDesc::Type::Float;
+        if (!selectable)
+            report.error(path + ".setting", "Setting '" + s.setting
+                                            + "' cannot be exposed as a switch; only enum, float, "
+                                              "int and bool settings can.");
     }
 
     // --- macros ---

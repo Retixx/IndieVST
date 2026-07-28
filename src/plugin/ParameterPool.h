@@ -47,6 +47,11 @@ public:
     float normalisedValue()   const noexcept { return get(); }
     float normalisedDefault() const noexcept { return defaultNorm_.load(std::memory_order_relaxed); }
 
+    /// Value in the instrument's own units - Hz, dB, ms. Graph widgets work in
+    /// engineering units, not in 0..1, so they need both directions.
+    float engineeringValue() const noexcept;
+    void  setEngineeringValue(float engineering);
+
     // --- juce::AudioProcessorParameter -------------------------------------
     juce::String getName(int maximumStringLength) const override;
     juce::String getLabel() const override;
@@ -73,8 +78,11 @@ private:
 /// Owns the pool and the mapping between pool slots and the loaded instrument.
 class ParameterPool {
 public:
-    static constexpr int kNumMacros = 8;
-    static constexpr int kNumParams = 32;
+    // Sized for a full architecture rather than a single generated patch.
+    // These are declared once at scan time and re-pointed per instrument, so
+    // the cost of a large pool is a few hundred floats, not complexity.
+    static constexpr int kNumMacros = 16;
+    static constexpr int kNumParams = 224;
 
     /// Called once from the processor constructor, before the host scans.
     void createParameters(juce::AudioProcessor& processor);

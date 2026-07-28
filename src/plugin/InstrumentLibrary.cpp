@@ -175,6 +175,18 @@ bool InstrumentLibrary::rename(const juce::String& id, const juce::String& newNa
     return false;
 }
 
+bool InstrumentLibrary::updateInstrument(const juce::String& id, const ir::Instrument& instrument) {
+    for (auto& e : entries_) {
+        if (e.id != id) continue;
+        const auto keptName = e.name;      // edits must not silently rename it
+        e.instrument = instrument;
+        e.instrument.name = keptName.toStdString();
+        if (e.onDisk) writeToDisk(e);
+        return true;
+    }
+    return false;
+}
+
 const LibraryEntry* InstrumentLibrary::find(const juce::String& id) const {
     for (const auto& e : entries_) if (e.id == id) return &e;
     return nullptr;

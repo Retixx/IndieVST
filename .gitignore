@@ -73,3 +73,7 @@ forge-crash-*.txt
 
 # ---- Generated instruments captured during dev ----
 /dev-instruments/
+
+# ---- Distributable packages ----
+dist/
+a.out

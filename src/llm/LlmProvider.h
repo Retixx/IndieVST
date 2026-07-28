@@ -23,7 +23,9 @@ struct GenerationRequest {
 
     int   maxTokens   = 8192;
     float temperature = 0.7f;
-    int   timeoutMs   = 12000;
+    /// Whole-generation budget. Responses stream, so this is when we stop
+    /// waiting rather than when a slow model starts looking like a dead socket.
+    int   timeoutMs   = 150000;
 };
 
 struct GenerationResult {
@@ -33,6 +35,10 @@ struct GenerationResult {
     std::string providerName;
     double      latencyMs   = 0.0;
     bool        usedFallback = false;
+    /// Set when the response had to be unwrapped from prose or rebuilt after
+    /// being cut off. Shown to the musician, so a recovered patch is never
+    /// presented as though it arrived clean.
+    std::string salvageNote;
 };
 
 using CancelCheck = std::function<bool()>;

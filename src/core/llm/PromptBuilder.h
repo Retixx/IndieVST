@@ -21,6 +21,19 @@ struct PromptSpec {
 /// sound-design heuristics and few-shot examples.
 std::string buildSystemPrompt();
 
+/// Patch mode: the instrument architecture is fixed, and the model designs
+/// within it - which sections are live, the modulation matrix, the wavetable
+/// content and every parameter value. Far more reliable than asking for a
+/// whole signal graph, and it yields an instrument with the full control
+/// surface instead of the handful of knobs a from-scratch graph tends to have.
+std::string buildPatchSystemPrompt();
+/// `referenceText` is the measurement block from
+/// `audio::ReferenceFeatures::toPromptText()`, or empty when the musician did
+/// not supply a recording.
+PromptSpec buildPatchPrompt(const std::string& userPrompt,
+                            const std::string& currentPatchJson = {},
+                            const std::string& referenceText = {});
+
 /// `currentIrJson` empty  -> generate a new instrument.
 /// `currentIrJson` set    -> edit it, returning a complete replacement.
 PromptSpec buildGenerationPrompt(const std::string& userPrompt,

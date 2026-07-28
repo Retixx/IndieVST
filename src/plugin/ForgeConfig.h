@@ -16,7 +16,7 @@
 namespace forge {
 
 /// Bumped whenever a stored field needs migrating. See ForgeConfig::load().
-inline constexpr int kConfigVersion = 2;
+inline constexpr int kConfigVersion = 3;
 
 struct ForgeConfig {
     enum class Provider { Anthropic, OpenAi, Ollama, Canned };
@@ -26,10 +26,16 @@ struct ForgeConfig {
     juce::String model;
     juce::String baseUrl;
 
-    /// Sonnet 5 has adaptive thinking on by default, so a 13k-token prompt can
-    /// take far longer than the 12s the original design assumed. Too short a
-    /// timeout looks exactly like the network being down.
-    int   timeoutMs   = 60000;
+    /// The whole-generation budget, not a per-read one.
+    ///
+    /// Responses are streamed now, so a slow model no longer looks like a dead
+    /// socket and this is free to be generous: it is the point at which we stop
+    /// waiting, not the point at which we mistake waiting for failure. A full
+    /// patch is up to 16k output tokens, which is minutes rather than seconds
+    /// on a large model, and at 60s a perfectly good generation was being
+    /// thrown away and replaced with the offline fallback - which is exactly
+    /// what "it timed out and gave me the wrong instrument" was.
+    int   timeoutMs   = 150000;
     int   maxRetries  = 1;
     float temperature = 0.7f;
     bool  forceOffline = false;

@@ -96,6 +96,76 @@ TEST_CASE(global_lfo_can_modulate_voice_parameters) {
     CHECK(maxRms > minRms * 1.1f);
 }
 
+TEST_CASE(a_second_route_into_the_amp_cannot_hold_the_note_open) {
+    // The bug behind "my guitar sounds like an organ".
+    //
+    // Modulation is summed, so velocity routed to amp.gain at depth 0.35 added
+    // a permanent 0.35 floor that the amplitude envelope had no way to remove.
+    // The note never ended - and both the offline fallback and the system
+    // prompt told everyone to make exactly that route, so every instrument the
+    // product has ever produced sustained forever.
+    //
+    // The amplifier is now scaled rather than offset by its extra sources, so
+    // zero stays reachable. This is bug class 2 from the handoff - a parameter
+    // that cannot reach its own minimum - in the modulation matrix rather than
+    // in the macros.
+    const char* json = R"({
+      "name":"Gate","voicing":"poly","polyphony":4,
+      "nodes":[
+        {"id":"o1","type":"osc.analog","scope":"voice","settings":{"wave":"saw"}},
+        {"id":"amp","type":"vca","scope":"voice"},
+        {"id":"env","type":"env.adsr","scope":"voice"},
+        {"id":"vel","type":"mod.velocity","scope":"voice"},
+        {"id":"master","type":"out.master","scope":"global"}],
+      "audio":[{"from":"o1","to":"amp"},{"from":"amp","to":"master"}],
+      "mod":[{"source":"env","target":"amp.gain","depth":1.0},
+             {"source":"vel","target":"amp.gain","depth":0.35}],
+      "params":[
+        {"id":"rel","label":"R","unit":"ms","min":0.5,"max":12000,"default":5,"taper":"log",
+         "bind":[{"node":"env","param":"release_ms"}]},
+        {"id":"sus","label":"S","min":0,"max":1,"default":0,
+         "bind":[{"node":"env","param":"sustain"}]},
+        {"id":"dec","label":"D","unit":"ms","min":0.5,"max":8000,"default":40,"taper":"log",
+         "bind":[{"node":"env","param":"decay_ms"}]}]})";
+
+    ir::IrReport report;
+    auto graph = build(json, report);
+    REQUIRE(graph != nullptr);
+
+    std::vector<float> l(512), r(512);
+    float* chans[2] = { l.data(), r.data() };
+
+    graph->noteOn(60, 1.0f);
+    float attackPeak = 0.0f;
+    for (int block = 0; block < 4; ++block) {
+        graph->process(chans, 512);
+        for (int i = 0; i < 512; ++i) attackPeak = std::max(attackPeak, std::abs(l[static_cast<size_t>(i)]));
+    }
+    CHECK(attackPeak > 0.01f);        // it made a sound at all
+
+    // Sustain 0, decay 40 ms: half a second later there must be nothing left.
+    graph->noteOff(60);
+    for (int block = 0; block < 60; ++block) graph->process(chans, 512);
+
+    float tail = 0.0f;
+    for (int block = 0; block < 20; ++block) {
+        graph->process(chans, 512);
+        for (int i = 0; i < 512; ++i) tail = std::max(tail, std::abs(l[static_cast<size_t>(i)]));
+    }
+    test::note("attack " + std::to_string(attackPeak) + "  tail " + std::to_string(tail));
+    CHECK(tail < attackPeak * 0.001f);
+
+    // ...and velocity still does something, which is why the route exists.
+    graph->reset();
+    graph->noteOn(60, 0.2f);
+    float softPeak = 0.0f;
+    for (int block = 0; block < 4; ++block) {
+        graph->process(chans, 512);
+        for (int i = 0; i < 512; ++i) softPeak = std::max(softPeak, std::abs(l[static_cast<size_t>(i)]));
+    }
+    CHECK(softPeak < attackPeak * 0.95f);
+}
+
 TEST_CASE(polyphony_and_voice_stealing_stay_bounded) {
     ir::IrReport report;
     auto graph = build(forge::llm::cannedLibrary()[1].json, report);   // pad, poly

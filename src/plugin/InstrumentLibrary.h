@@ -46,6 +46,8 @@ public:
 
     bool remove(const juce::String& id);
     bool rename(const juce::String& id, const juce::String& newName);
+    /// Writes an edited instrument back over its library entry.
+    bool updateInstrument(const juce::String& id, const ir::Instrument&);
 
     const std::vector<LibraryEntry>& entries() const noexcept { return entries_; }
     const LibraryEntry* find(const juce::String& id) const;

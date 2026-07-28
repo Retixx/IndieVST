@@ -420,6 +420,18 @@ void pruneUnreachable(Instrument& inst, IrReport& report) {
         if (!changed) break;
     }
 
+    // Anything the musician can SEE stays, routed or not.
+    //
+    // This is why the MOD page arrived with a single envelope on it: a patch
+    // that only routed env_1 left every other envelope, all four LFOs and the
+    // sequencer with no path to the output, so they were pruned as dead weight
+    // and took their whole panels with them. On a fixed architecture that is
+    // exactly wrong - an unrouted LFO is not dead, it is waiting to be used,
+    // and a producer expects to find it there and assign it.
+    for (const auto& p : inst.params)
+        for (const auto& b : p.bind) keep.insert(b.node);
+    for (const auto& s : inst.switches) keep.insert(s.node);
+
     std::vector<std::string> removed;
     for (size_t i = 0; i < inst.nodes.size();) {
         if (keep.count(inst.nodes[i].id) == 0) {
@@ -452,9 +464,82 @@ void pruneUnreachable(Instrument& inst, IrReport& report) {
                           + " node(s) whose audio never reached the output: " + list + ".");
 }
 
+// --- step 6b: expose the switches every synth is expected to have ---------
+
+void autoExposeSwitches(Instrument& inst, IrReport& report) {
+    std::unordered_set<std::string> taken, covered;
+    for (const auto& s : inst.switches) {
+        taken.insert(s.id);
+        covered.insert(s.node + "." + s.setting);
+    }
+
+    // Settings worth surfacing on any instrument that has them. A generated
+    // synth with no way to change the oscillator shape is not a synth anyone
+    // would use, and models routinely forget to expose them.
+    static const struct { const char* setting; const char* label; const char* group; }
+        wanted[] = {
+            {"wave",     "Wave",   "Oscillators"},
+            {"mode",     "Mode",   "Filter"},
+            {"slope",    "Slope",  "Filter"},
+            {"type",     "Type",   "Shaper"},
+            {"color",    "Colour", "Oscillators"},
+            {"unison",   "Voices", "Oscillators"},
+            {"octave",   "Octave", "Oscillators"},
+            {"division", "Sync",   "Space"},
+            {"pattern",  "Pattern","Motion"},
+            {"op",       "Op",     "Motion"},
+        };
+
+    int added = 0;
+    for (const auto& node : inst.nodes) {
+        const auto* man = manifestOf(node);
+        if (man == nullptr) continue;
+        for (const auto& w : wanted) {
+            if (static_cast<int>(inst.switches.size()) >= 64) break;
+            const SettingDesc* desc = man->findSetting(w.setting);
+            if (desc == nullptr) continue;
+            const bool selectable = desc->type == SettingDesc::Type::Enum
+                                 || desc->type == SettingDesc::Type::Int
+                                 || desc->type == SettingDesc::Type::Bool;
+            if (!selectable) continue;
+            if (covered.count(node.id + "." + w.setting)) continue;
+
+            SwitchSpec sw;
+            sw.id      = uniqueId(sanitiseIdentifier(node.id + "_" + w.setting), taken);
+            sw.label   = w.label;
+            sw.node    = node.id;
+            sw.setting = w.setting;
+            sw.group   = w.group;
+            taken.insert(sw.id);
+            covered.insert(node.id + "." + w.setting);
+            inst.switches.push_back(std::move(sw));
+            ++added;
+        }
+    }
+
+    if (added > 0)
+        report.fixed("switches", "Exposed " + std::to_string(added)
+                                 + " module setting(s) as selectors - wave shapes, filter "
+                                   "modes and the like, which otherwise could not be changed "
+                                   "at all.");
+}
+
 // --- step 7: caps and tidy-up ---------------------------------------------
 
 void enforceCapsAndTidy(Instrument& inst, IrReport& report) {
+    // Switches pointing at nodes or settings that no longer exist.
+    inst.switches.erase(std::remove_if(inst.switches.begin(), inst.switches.end(),
+        [&](const SwitchSpec& s) {
+            const NodeSpec* n = inst.findNode(s.node);
+            if (n == nullptr) return true;
+            const auto* man = manifestOf(*n);
+            return man == nullptr || man->findSetting(s.setting) == nullptr;
+        }), inst.switches.end());
+    // Cap sized for the fixed architecture, which legitimately carries a
+    // selector per oscillator wave, filter mode, LFO shape and sync division.
+    // The old limit of 12 silently deleted two thirds of them.
+    if (inst.switches.size() > 64) inst.switches.resize(64);
+
     // Parameters that now control nothing.
     const size_t paramsBefore = inst.params.size();
     inst.params.erase(std::remove_if(inst.params.begin(), inst.params.end(),
@@ -547,6 +632,7 @@ void repair(Instrument& inst, IrReport& report, const RepairOptions& opts) {
     ensureOutputPath(inst, report);
     if (opts.insertGateIfMissing) ensureAmplitudeGate(inst, report);
     if (opts.pruneUnreachable)    pruneUnreachable(inst, report);
+    if (opts.exposeSwitches)      autoExposeSwitches(inst, report);
     if (opts.enforceCaps)         enforceCapsAndTidy(inst, report);
 
     if (inst.name.empty()) inst.name = "Untitled";

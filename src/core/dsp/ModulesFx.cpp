@@ -10,6 +10,7 @@
 // registry drives all three (SPEC 6.5).
 // ---------------------------------------------------------------------------
 #include "core/dsp/ModuleKit.h"
+
 #include "core/dsp/Registry.h"
 
 namespace forge {
@@ -620,63 +621,378 @@ ModuleManifest manifestFilterFormant() {
 // ===========================================================================
 // osc.karplus - plucked string physical model
 // ===========================================================================
-class OscKarplus final : public ParamHolder<4> {
+/// A one-pole allpass. Cascaded, these make a delay line frequency-dependent,
+/// which is what turns a perfect harmonic comb into a real, slightly sharp
+/// string.
+class Allpass1 {
 public:
-    enum { kLevel, kDamping, kBrightness, kDecay };
+    void reset() noexcept { x1_ = y1_ = 0.0f; }
+    void setCoeff(float a) noexcept { a_ = clampT(a, -0.98f, 0.98f); }
+    float process(float x) noexcept {
+        const float y = -a_ * x + x1_ + a_ * y1_;
+        x1_ = x; y1_ = sanitize(y);
+        return y1_;
+    }
+private:
+    float a_ = 0.0f, x1_ = 0.0f, y1_ = 0.0f;
+};
+
+/// What a plucked string actually starts from.
+///
+/// A player pulls the string aside at one point and lets go, so the initial
+/// shape is a TRIANGLE with its apex at the pick point. Decomposed, that shape
+/// gives harmonic k an amplitude proportional to sin(k*pi*beta) / k^2 - two
+/// things at once, and both of them matter:
+///
+///   * sin(k*pi*beta) is the comb of missing harmonics at the pick position,
+///   * 1/k^2 is why a real plucked note is dominated by its FUNDAMENTAL.
+///
+/// The model used to excite with flat white noise instead, which starts every
+/// harmonic at full strength. That is the spectrum of a filtered sawtooth, and
+/// measured on a bare string at E3 it put the 2nd and 3rd partials 13 dB ABOVE
+/// the fundamental - so the ear heard the wrong note in the wrong octave and
+/// read the whole thing as a synthesiser. No amount of filtering downstream
+/// fixes an excitation that never had a fundamental in it.
+///
+/// A pickup, and a soundboard, respond to how fast the string is MOVING, not to
+/// where it is - so what radiates is the derivative of that triangle, one power
+/// of k brighter: `sin(k*pi*beta) / k`. Falling, fundamental-led, and with the
+/// pick comb intact.
+///
+/// The derivative is taken HERE, analytically, on a shape that is known in
+/// closed form. It was originally done the obvious way instead - first
+/// difference of the output, scaled back up by sr/(2*pi*f0) to restore the
+/// level - and that scale factor reaches 512 on a low note. Everything the
+/// difference saw got multiplied by it, including the small step at every block
+/// boundary where `delay` is recomputed from the glide, which turned into a
+/// click every 256 samples and hard-clipped on top: audible as a crackle over
+/// every note. Differentiating a rectangle instead needs no gain, no history
+/// and no per-block state, and is the same filter.
+///
+/// The two levels are `1 - beta` and `-beta`, which sum to zero over the period
+/// by construction - a string cannot hold a net offset, and at 6 ms the loop's
+/// DC blocker is far too slow to take one out.
+///
+/// Normalised to a peak of 1 so the pick position sets the TIMBRE and not the
+/// level. Without that, moving the pick towards the bridge quietly turns the
+/// whole instrument up, and everything downstream - filter drive, the amp, the
+/// speaker - is driven differently by a control that has no business doing it.
+inline float pluckVelocity(float x, float beta) noexcept {
+    const float b = clampT(beta, 0.02f, 0.98f);
+    const float v = (x < b) ? (1.0f - b) : -b;
+    return v / std::max(b, 1.0f - b);
+}
+
+class OscKarplus final : public ParamHolder<6> {
+public:
+    enum { kLevel, kDamping, kBrightness, kDecay, kPickPos, kStiffness };
 
     void prepare(const ModulePrepareInfo& info) override {
         sr_ = info.sampleRate;
         rng_.reseed(info.seed ^ 0xC0FFEEull);
         for (auto& l : lines_) l.prepare(static_cast<int>(sr_ / 20.0) + 8);
-        for (auto& d : damp_) d.reset();
         reset();
     }
     void reset() noexcept override {
         for (auto& l : lines_) l.clear();
-        for (auto& d : damp_) d.reset();
+        for (auto& d : damp_)  d.reset();
+        for (auto& b : block_) b.reset();
+        for (auto& s : stiff_) { s[0].reset(); s[1].reset(); s[2].reset(); }
+        pickFilt_.reset();
+        for (auto& t : tone_) t.reset();
         exciteLeft_ = 0;
+        exciteLen_  = 1;
+        pending_    = false;
     }
 
     void noteOn(float, float velocity) noexcept override {
-        // Excite with a short burst; length scales with velocity so hard hits
-        // are brighter, exactly as a harder pluck would be.
-        exciteLeft_ = static_cast<int>(clampT(velocity, 0.1f, 1.0f) * 0.004f * static_cast<float>(sr_));
-        for (auto& l : lines_) l.clear();
+        velocity_ = clampT(velocity, 0.05f, 1.0f);
+        pending_  = true;
     }
 
     void process(const ProcessArgs& a) noexcept override {
-        const float level = clamp01(p(kLevel));
-        const float decay = clampT(p(kDecay), 0.80f, 0.9995f);
-        const float bright = clampT(p(kBrightness), 500.0f, 16000.0f);
+        const float level   = clamp01(p(kLevel));
+        const float decay   = clampT(p(kDecay), 0.80f, 0.9995f);
+        const float bright  = clampT(p(kBrightness), 500.0f, 16000.0f);
         const float damping = clamp01(p(kDamping));
+        const float pickPos = clampT(p(kPickPos), 0.02f, 0.5f);
+        const float stiff   = clamp01(p(kStiffness));
 
         const float freq = clampT(a.v ? a.v->glideFreqHz : 220.0f, 20.0f,
                                   static_cast<float>(sr_) * 0.25f);
-        const float delay = clampT(static_cast<float>(sr_) / freq, 2.0f,
+
+        // The damping filter and the dispersion allpasses all sit inside the
+        // loop, so their own delay is part of the loop length.
+        // POSITIVE coefficient. A first-order allpass with a > 0 delays low
+        // frequencies more than high ones, so the upper partials come round
+        // the loop sooner and sit SHARP of the harmonic series - which is what
+        // stiffness does to a real string. With the sign the other way the
+        // partials go flat, which sounds like a detuned synth rather than a
+        // string.
+        const float apCoeff = 0.72f * stiff;
+
+        // The allpasses add delay at the fundamental, and it has to come out of
+        // the delay line or the whole string plays flat. The DC approximation
+        // is not good enough - it left the string 24 cents flat at full
+        // stiffness - so the phase delay is evaluated exactly at f0.
+        //
+        // For A(z) = (-a + z^-1) / (1 - a z^-1), the phase delay at w is
+        // -arg(A(e^jw)) / w, computed here once per block.
+        float apDelay = 0.0f;
+        {
+            // Note there is no "bypass at zero" shortcut: with a = 0 the
+            // allpass is exactly one sample of delay, not a pass-through, and
+            // skipping the compensation there left the string 21 cents flat.
+            const float w  = 6.28318530718f * freq / static_cast<float>(sr_);
+            const float cw = std::cos(w), sw = std::sin(w);
+            const float nRe = -apCoeff + cw,   nIm = -sw;
+            const float dRe = 1.0f - apCoeff * cw, dIm = apCoeff * sw;
+            const float phase = std::atan2(nIm, nRe) - std::atan2(dIm, dRe);
+            apDelay = kAllpassStages * (-phase / std::max(1.0e-6f, w));
+        }
+        const float loopDelay = static_cast<float>(sr_) / freq - kFilterDelay - apDelay;
+        const float delay = clampT(loopDelay, 2.0f,
                                    static_cast<float>(lines_[0].size() - 4));
-        for (auto& d : damp_) d.setCutoff(lerp(bright, 400.0f, damping), sr_);
+
+        // Brightness relative to the fundamental: the loop filter is applied
+        // once per trip, so a fixed cutoff in Hz damps the treble far harder
+        // than the bass.
+        const float wanted = lerp(bright, 400.0f, damping);
+        const float cutoff = clampT(std::max(wanted, freq * 4.0f),
+                                    100.0f, static_cast<float>(sr_) * 0.45f);
+        for (auto& d : damp_) d.setCutoff(cutoff, sr_);
+        for (auto& t : tone_) t.setLowPass(kPickupTopHz, kPickupQ, sr_);
+
+        // --- string stiffness --------------------------------------------
+        //
+        // A real string is not a pure delay. It is stiff, so high partials
+        // travel faster and come back progressively SHARP of the harmonic
+        // series. That inharmonicity is a large part of what the ear uses to
+        // tell a string from an oscillator - a perfectly harmonic comb is
+        // exactly what a filtered sawtooth already sounds like, which is why
+        // the model on its own still read as a synth.
+        for (auto& set : stiff_) for (auto& ap : set) ap.setCoeff(apCoeff);
+
+        const float t60 = lerp(0.12f, 14.0f,
+                               std::pow(clamp01((decay - 0.80f) / 0.1995f), 2.0f))
+                        * (1.0f + 0.35f * clamp01(delay / 900.0f));
+        const float loopGain = std::exp(-6.907755f
+                                        / std::max(1.0f, t60 * static_cast<float>(sr_)));
+
+        if (pending_) {
+            pending_    = false;
+            exciteLeft_ = static_cast<int>(delay) + 1;
+            exciteLen_  = exciteLeft_;
+            for (auto& l : lines_) l.clear();
+            for (auto& d : damp_)  d.reset();
+            for (auto& b : block_) b.reset();
+            for (auto& set : stiff_) for (auto& ap : set) ap.reset();
+            for (auto& t : tone_) t.reset();
+            pickFilt_.reset();
+            // A pick is a hard, bright scrape, not flat white noise. Opening
+            // the excitation filter with velocity is what makes a hard pick
+            // sound bright and a soft one sound round, which is most of the
+            // dynamic life of a plucked instrument.
+            //
+            // Band-limited far harder than it looks like it needs to be,
+            // because the velocity read-out below differentiates the output:
+            // whatever noise is left up at 10 kHz gets lifted by 30 dB or more
+            // on its way out, and at 1200-9000 Hz that turned every single note
+            // into an audible burst of hiss.
+            pickFilt_.setCutoff(lerp(700.0f, 4200.0f, velocity_), sr_);
+        }
+
+        // How much of the excitation is scrape rather than displacement. A
+        // gentle pluck with the flesh of a finger is nearly pure displacement;
+        // a hard pick drags across the winding first and adds a broadband
+        // scratch. Keeping this proportional to velocity is what makes hard
+        // playing brighter rather than merely louder.
+        const float scrapeAmt = lerp(0.02f, 0.11f, velocity_);
+
+        // Pickup position, in samples along the string. The excitation shape
+        // already carries the comb of the PICK; this second, shallower comb is
+        // the magnetic PICKUP reading the string at one point, which is part of
+        // why an electric guitar is not just a string in a room.
+        const float pickDelay = clampT(delay * pickPos, 1.0f, delay - 1.0f);
 
         for (int n = 0; n < a.numSamples; ++n) {
-            const float burst = (exciteLeft_ > 0) ? rng_.nextBipolar() : 0.0f;
-            if (exciteLeft_ > 0) --exciteLeft_;
+            float burst = 0.0f;
+            if (exciteLeft_ > 0) {
+                const float x = static_cast<float>(exciteLen_ - exciteLeft_)
+                              / static_cast<float>(std::max(1, exciteLen_));
+                const float body   = pluckVelocity(x, pickPos) * kPluckGain;
+                const float scrape = pickFilt_.process(rng_.nextBipolar()) * scrapeAmt;
+                // Remove any DC on the way in so none can accumulate in a
+                // near-unity loop.
+                burst = block_[0].process((body + scrape) * velocity_);
+                --exciteLeft_;
+            } else {
+                burst = block_[0].process(0.0f);
+            }
 
             for (int ch = 0; ch < kNumChannels; ++ch) {
                 const float s = lines_[ch].read(delay);
-                lines_[ch].write(burst + damp_[ch].process(s) * decay);
-                a.out[ch][n] += clampT(s, -2.0f, 2.0f) * level;
+
+                // --- pickup position --------------------------------------
+                //
+                // Reading the string at one point rather than integrating along
+                // it notches every harmonic with a node there. Shallow on
+                // purpose: the pluck shape above already removes the harmonics
+                // physics says are missing, and a second full-depth comb on top
+                // of it took the fundamental out with them.
+                const float picked = s - lines_[ch].read(delay - pickDelay) * kPickupDepth;
+
+                // --- the pickup's own rolloff ------------------------------
+                //
+                // The excitation already rises at +6 dB/oct, and nothing
+                // physical does that for ever. A magnetic pickup is an inductor
+                // with capacitance across it: it peaks somewhere between 2 and
+                // 7 kHz and falls off a cliff above, and a soundboard behaves
+                // much the same way. Without it the pick noise sat right up in
+                // the top octave, and anything with no cabinet after it - an
+                // acoustic guitar most of all - got the lot.
+                //
+                // Fixed in Hz on purpose. This one is electrical, not a
+                // property of the string, so unlike the loop damping it must
+                // NOT track the note.
+                const float voiced = tone_[ch].process(picked);
+
+                float fb = damp_[ch].process(s) * loopGain;
+                for (auto& ap : stiff_[ch]) fb = ap.process(fb);
+                lines_[ch].write(burst + fb);
+
+                a.out[ch][n] += clampT(voiced, -2.0f, 2.0f) * level;
             }
         }
     }
 
-    bool holdsVoice() const noexcept override { return exciteLeft_ > 0; }
+    bool holdsVoice() const noexcept override { return pending_ || exciteLeft_ > 0; }
 
 private:
+    static constexpr float kFilterDelay   = 0.5f;
+    static constexpr int   kAllpassStages = 3;
+    /// Calibrated so the string PEAKS where every other source in the rack
+    /// peaks at the same `level` - about 0.9.
+    ///
+    /// It was 1.7, carried over from an earlier excitation shape, and measured
+    /// against the level of the fundamental rather than the peak. The string
+    /// was putting out 1.27 where an oscillator put out 0.89: over full scale,
+    /// clipping on its own output limiter, and driving everything after it 3 dB
+    /// harder than the rack is calibrated for. On a patch with `dr_drive` up at
+    /// 6.5 - which is what the model writes for anything gritty - a chord
+    /// through that is intermodulation distortion, and it is heard as a
+    /// crackle that no amount of work on the string itself will remove.
+    static constexpr float kPluckGain     = 1.2f;
+    /// Was 0.86, which cost the fundamental 2 dB and boosted the third partial
+    /// by 5 - on top of an excitation that had no fundamental to begin with.
+    static constexpr float kPickupDepth   = 0.42f;
+    /// Where the pickup resonates, and immediately above it, stops responding.
+    /// A single coil sits near 6 kHz, a humbucker lower; the PEAK is as much of
+    /// the character as the rolloff is, and a plain one-pole in its place made
+    /// every plucked instrument dull - measured centroid 824 Hz against 1424
+    /// for a real recording of one.
+    static constexpr float kPickupTopHz   = 6800.0f;
+    static constexpr float kPickupQ       = 1.15f;
+
     double    sr_ = 48000.0;
     DelayLine lines_[kNumChannels];
     OnePole   damp_[kNumChannels];
+    DcBlocker block_[kNumChannels];
+    Allpass1  stiff_[kNumChannels][kAllpassStages];
+    OnePole   pickFilt_;
+    Biquad    tone_[kNumChannels];
     Rng       rng_;
     int       exciteLeft_ = 0;
+    int       exciteLen_  = 1;
+    bool      pending_    = false;
+    float     velocity_   = 1.0f;
 };
+
+// ===========================================================================
+// fx.cabinet - guitar / bass speaker cabinet
+// ===========================================================================
+//
+// The missing piece that made every "electric guitar" sound like a synth.
+//
+// A guitar speaker is a small, heavily damped driver in a box, and it is not
+// remotely flat: nothing below about 80 Hz, a broad presence peak around
+// 2-4 kHz, and an extremely steep rolloff above 5 kHz. A distorted signal
+// contains harmonics all the way to Nyquist, and it is precisely that
+// 5-20 kHz fizz - which no real amp can produce - that the ear reads as
+// "synthetic". You cannot make a convincing electric guitar without one.
+//
+// Modelled here as a bandpass pair plus two resonant peaks, which is cheap and
+// captures the parts that matter perceptually.
+class FxCabinet final : public ParamHolder<3> {
+public:
+    enum { kLowHz, kHighHz, kMix };
+
+    void prepare(const ModulePrepareInfo& info) override {
+        sr_ = info.sampleRate;
+        reset();
+    }
+    void reset() noexcept override {
+        for (auto& f : hp_)      f.reset();
+        for (auto& f : lp1_)     f.reset();
+        for (auto& f : lp2_)     f.reset();
+        for (auto& f : presence_) f.reset();
+        for (auto& f : body_)     f.reset();
+    }
+
+    void process(const ProcessArgs& a) noexcept override {
+        const float lowHz  = clampT(p(kLowHz),  40.0f,  400.0f);
+        const float highHz = clampT(p(kHighHz), 1500.0f, 12000.0f);
+        const float mix    = clamp01(p(kMix));
+
+        for (int ch = 0; ch < kNumChannels; ++ch) {
+            hp_[ch].setHighPass(lowHz, 0.7f, sr_);
+            // Two cascaded low passes: a single pole is nowhere near steep
+            // enough, and the steepness is the whole point.
+            lp1_[ch].setLowPass(highHz, 0.7f, sr_);
+            lp2_[ch].setLowPass(highHz * 1.15f, 0.6f, sr_);
+            presence_[ch].setPeak(2600.0f, 1.1f, 4.5f, sr_);
+            body_[ch].setPeak(180.0f, 1.0f, 2.5f, sr_);
+        }
+
+        for (int ch = 0; ch < kNumChannels; ++ch) {
+            for (int n = 0; n < a.numSamples; ++n) {
+                const float dry = a.in[ch][n];
+                float w = hp_[ch].process(dry);
+                w = body_[ch].process(w);
+                w = presence_[ch].process(w);
+                w = lp1_[ch].process(w);
+                w = lp2_[ch].process(w);
+                a.out[ch][n] += lerp(dry, w, mix);
+            }
+        }
+    }
+
+private:
+    double sr_ = 48000.0;
+    Biquad hp_[kNumChannels], lp1_[kNumChannels], lp2_[kNumChannels];
+    Biquad presence_[kNumChannels], body_[kNumChannels];
+};
+
+ModuleManifest manifestFxCabinet() {
+    ModuleManifest m;
+    m.type = "fx.cabinet"; m.category = "effect";
+    m.summary = "Guitar / bass speaker cabinet. Steep rolloff above 5 kHz, a presence peak "
+                "around 2-4 kHz and no deep bass - the thing that makes a driven signal "
+                "sound like an amp in a room rather than a distorted oscillator. Essential "
+                "on any electric guitar or bass; the fizz above 5 kHz that a real speaker "
+                "cannot produce is what makes a modelled guitar sound synthetic.";
+    m.allowVoice = false; m.allowGlobal = true;
+    m.audioIns = 1; m.audioOuts = 1; m.costWeight = 0.5f;
+    m.params = {
+        P("low_hz",  "Low Cut",  "Hz",   40.0f,   400.0f,   85.0f, Taper::Log),
+        P("high_hz", "Top",      "Hz", 1500.0f, 12000.0f, 4800.0f, Taper::Log, true,
+          "Where the speaker stops. Real guitar cabs die around 5 kHz; anything "
+          "above that is fizz no amp can make."),
+        P("mix",     "Cabinet",  "",     0.0f,     1.0f,    0.0f,  Taper::Linear, true),
+    };
+    m.factory = mk<FxCabinet>();
+    return m;
+}
 
 ModuleManifest manifestOscKarplus() {
     ModuleManifest m;
@@ -689,8 +1005,17 @@ ModuleManifest manifestOscKarplus() {
         P("damping",    "Damp",   "",   0.0f,     1.0f,    0.3f, Taper::Linear, true,
           "Higher damping = duller and shorter, like a muted string."),
         P("brightness", "Bright", "Hz", 500.0f, 16000.0f, 6000.0f, Taper::Log),
-        P("decay",      "Decay",  "",   0.80f,   0.9995f, 0.99f, Taper::Linear, true,
-          "How long the string rings. Above 0.995 sustains for many seconds."),
+        P("decay",      "Decay",  "",   0.80f,   0.9995f, 0.90f, Taper::Linear, true,
+          "How long the string rings. 0.88-0.93 is a real plucked instrument; "
+          "above 0.96 it sustains for ten seconds or more, which is a pad."),
+        P("pick_pos",   "Pick Pos", "", 0.02f,    0.5f,   0.14f, Taper::Linear, true,
+          "Where along the string it is plucked. Near the bridge (0.05) is thin "
+          "and nasal; over the neck (0.4) is round and full. This comb of missing "
+          "harmonics is the most recognisable signature of a plucked instrument."),
+        P("stiffness",  "Stiffness", "", 0.0f,    1.0f,   0.30f, Taper::Linear, true,
+          "String stiffness. Real strings are not perfect delays - their high "
+          "partials run sharp, and that inharmonicity is what the ear uses to "
+          "tell a string from an oscillator."),
     };
     m.factory = mk<OscKarplus>();
     return m;
@@ -787,9 +1112,283 @@ ModuleManifest manifestModSequencer() {
     return m;
 }
 
+// ===========================================================================
+// fx.flanger - short modulated delay with feedback
+// ===========================================================================
+class FxFlanger final : public ParamHolder<5> {
+public:
+    enum { kRateHz, kDepth, kFeedback, kMix, kDelayMs };
+
+    void prepare(const ModulePrepareInfo& info) override {
+        sr_ = info.sampleRate;
+        for (auto& l : lines_) l.prepare(static_cast<int>(sr_ * 0.03) + 8);
+        reset();
+    }
+    void reset() noexcept override {
+        for (auto& l : lines_) l.clear();
+        phase_ = 0.0f; fb_[0] = fb_[1] = 0.0f;
+    }
+
+    void process(const ProcessArgs& a) noexcept override {
+        const float rate  = clampT(p(kRateHz), 0.01f, 8.0f);
+        const float depth = clamp01(p(kDepth));
+        // Negative feedback is what gives a flanger its hollow, metallic
+        // through-zero character rather than sounding like a chorus.
+        const float fbAmt = clampT(p(kFeedback), -0.95f, 0.95f);
+        const float mix   = clamp01(p(kMix));
+        const float base  = clampT(p(kDelayMs), 0.2f, 12.0f) * 0.001f * static_cast<float>(sr_);
+        const float inc   = rate / static_cast<float>(sr_);
+        const float sweep = base * 0.9f * depth;
+
+        for (int n = 0; n < a.numSamples; ++n) {
+            phase_ += inc; if (phase_ >= 1.0f) phase_ -= 1.0f;
+            for (int ch = 0; ch < kNumChannels; ++ch) {
+                const float lfo = std::sin(kTwoPi * (phase_ + (ch == 1 ? 0.25f : 0.0f)));
+                const float d = clampT(base + lfo * sweep, 1.0f,
+                                       static_cast<float>(lines_[ch].size() - 4));
+                const float dry = a.in[ch][n];
+                lines_[ch].write(dry + fb_[ch] * fbAmt);
+                const float wet = lines_[ch].read(d);
+                fb_[ch] = clampT(sanitize(wet), -2.0f, 2.0f);
+                a.out[ch][n] = lerp(dry, (dry + wet) * 0.7f, mix);
+            }
+        }
+    }
+
+private:
+    double    sr_ = 48000.0;
+    DelayLine lines_[kNumChannels];
+    float     phase_ = 0.0f, fb_[kNumChannels]{};
+};
+
+ModuleManifest manifestFxFlanger() {
+    ModuleManifest m;
+    m.type = "fx.flanger"; m.category = "effect";
+    m.summary = "Flanger: a very short swept delay with feedback. Jet-plane whooshes and metallic sweeps. Negative feedback gives the hollow through-zero sound.";
+    m.allowVoice = false; m.allowGlobal = true;
+    m.audioIns = 1; m.audioOuts = 1; m.costWeight = 0.9f;
+    m.params = {
+        P("rate_hz",  "Rate",     "Hz",  0.01f, 8.0f,  0.2f, Taper::Log),
+        P("depth",    "Depth",    "",    0.0f,  1.0f,  0.7f),
+        P("feedback", "Feedback", "",   -0.95f, 0.95f, 0.5f),
+        P("mix",      "Mix",      "",    0.0f,  1.0f,  0.0f),
+        P("delay_ms", "Delay",    "ms",  0.2f, 12.0f,  2.0f, Taper::Log),
+    };
+    m.factory = mk<FxFlanger>();
+    return m;
+}
+
+// ===========================================================================
+// fx.ringmod - ring modulation against an internal carrier
+// ===========================================================================
+class FxRingMod final : public ParamHolder<3> {
+public:
+    enum { kFreqHz, kMix, kTrack };
+
+    void prepare(const ModulePrepareInfo& info) override { sr_ = info.sampleRate; reset(); }
+    void reset() noexcept override { phase_ = 0.0f; }
+
+    void process(const ProcessArgs& a) noexcept override {
+        float freq = clampT(p(kFreqHz), 1.0f, 8000.0f);
+        const float track = clamp01(p(kTrack));
+        if (track > 0.001f && a.v != nullptr)
+            freq *= std::pow(clampT(a.v->baseFreqHz / 261.63f, 0.03f, 32.0f), track);
+        freq = clampT(freq, 1.0f, static_cast<float>(sr_) * 0.45f);
+
+        const float mix = clamp01(p(kMix));
+        const float inc = freq / static_cast<float>(sr_);
+
+        for (int n = 0; n < a.numSamples; ++n) {
+            phase_ += inc; if (phase_ >= 1.0f) phase_ -= 1.0f;
+            const float carrier = std::sin(kTwoPi * phase_);
+            for (int ch = 0; ch < kNumChannels; ++ch)
+                a.out[ch][n] = lerp(a.in[ch][n], a.in[ch][n] * carrier, mix);
+        }
+    }
+
+private:
+    double sr_ = 48000.0;
+    float  phase_ = 0.0f;
+};
+
+ModuleManifest manifestFxRingMod() {
+    ModuleManifest m;
+    m.type = "fx.ringmod"; m.category = "effect";
+    m.summary = "Ring modulator. Multiplies the signal by a sine, producing sum and difference tones - clangorous, bell-like and inharmonic. Key tracking keeps it musical across the keyboard.";
+    m.allowVoice = true; m.allowGlobal = true;
+    m.audioIns = 1; m.audioOuts = 1; m.costWeight = 0.4f;
+    m.params = {
+        P("freq_hz", "Freq",  "Hz", 1.0f, 8000.0f, 220.0f, Taper::Log),
+        P("mix",     "Mix",   "",   0.0f,    1.0f,   0.0f),
+        P("track",   "Track", "",   0.0f,    1.0f,   0.0f, Taper::Linear, true,
+          "1.0 makes the carrier follow the played note, keeping it harmonic."),
+    };
+    m.factory = mk<FxRingMod>();
+    return m;
+}
+
+// ===========================================================================
+// fx.autopan - LFO stereo movement
+// ===========================================================================
+class FxAutoPan final : public ParamHolder<3> {
+public:
+    enum { kRateHz, kDepth, kShape };
+
+    void prepare(const ModulePrepareInfo& info) override { sr_ = info.sampleRate; reset(); }
+    void reset() noexcept override { phase_ = 0.0f; }
+
+    void process(const ProcessArgs& a) noexcept override {
+        const float rate  = clampT(p(kRateHz), 0.01f, 20.0f);
+        const float depth = clamp01(p(kDepth));
+        const float shape = clamp01(p(kShape));
+        const float inc   = rate / static_cast<float>(sr_);
+
+        for (int n = 0; n < a.numSamples; ++n) {
+            phase_ += inc; if (phase_ >= 1.0f) phase_ -= 1.0f;
+            const float sine   = std::sin(kTwoPi * phase_);
+            const float square = phase_ < 0.5f ? 1.0f : -1.0f;
+            const float pan    = lerp(sine, square, shape) * depth;
+            const float l = std::sqrt(clamp01(0.5f * (1.0f - pan))) * 1.41421356f;
+            const float r = std::sqrt(clamp01(0.5f * (1.0f + pan))) * 1.41421356f;
+            a.out[0][n] = a.in[0][n] * l;
+            a.out[1][n] = a.in[1][n] * r;
+        }
+    }
+
+private:
+    double sr_ = 48000.0;
+    float  phase_ = 0.0f;
+};
+
+ModuleManifest manifestFxAutoPan() {
+    ModuleManifest m;
+    m.type = "fx.autopan"; m.category = "effect";
+    m.summary = "Auto-panner. Sweeps the image left to right; shape morphs from a smooth sine to a hard square for chopped, gated movement.";
+    m.allowVoice = false; m.allowGlobal = true;
+    m.audioIns = 1; m.audioOuts = 1; m.costWeight = 0.3f;
+    m.params = {
+        P("rate_hz", "Rate",  "Hz", 0.01f, 20.0f, 1.0f, Taper::Log),
+        P("depth",   "Depth", "",   0.0f,   1.0f, 0.0f),
+        P("shape",   "Shape", "",   0.0f,   1.0f, 0.0f, Taper::Linear, true,
+          "0 = smooth sine sweep, 1 = hard square chop."),
+    };
+    m.factory = mk<FxAutoPan>();
+    return m;
+}
+
+// ===========================================================================
+// fx.exciter - high-band harmonic generation
+// ===========================================================================
+class FxExciter final : public ParamHolder<3> {
+public:
+    enum { kFreqHz, kAmount, kMix };
+
+    void prepare(const ModulePrepareInfo& info) override { sr_ = info.sampleRate; reset(); }
+    void reset() noexcept override {
+        for (int ch = 0; ch < kNumChannels; ++ch) { split_[ch].reset(); dc_[ch].reset(); }
+    }
+
+    void process(const ProcessArgs& a) noexcept override {
+        const float freq   = clampT(p(kFreqHz), 500.0f, 12000.0f);
+        const float amount = clampT(p(kAmount), 1.0f, 20.0f);
+        const float mix    = clamp01(p(kMix));
+        for (auto& s : split_) s.setCutoff(freq, sr_, 0.7071f);
+
+        for (int ch = 0; ch < kNumChannels; ++ch) {
+            for (int n = 0; n < a.numSamples; ++n) {
+                const float dry = a.in[ch][n];
+                // Saturate only the top band, then add it back. Distorting the
+                // whole signal would just make it dirty; this makes it bright.
+                const float high = split_[ch].process(dry).hp;
+                const float exc  = dc_[ch].process(fastTanh(high * amount)) / std::sqrt(amount);
+                a.out[ch][n] = dry + exc * mix;
+            }
+        }
+    }
+
+private:
+    double    sr_ = 48000.0;
+    Svf2      split_[kNumChannels];
+    DcBlocker dc_[kNumChannels];
+};
+
+ModuleManifest manifestFxExciter() {
+    ModuleManifest m;
+    m.type = "fx.exciter"; m.category = "effect";
+    m.summary = "Harmonic exciter. Saturates only the band above the crossover and adds it back, so the sound gets brighter and more present without getting dirty. Standard finishing move on vocals, keys and leads.";
+    m.allowVoice = false; m.allowGlobal = true;
+    m.audioIns = 1; m.audioOuts = 1; m.costWeight = 0.6f;
+    m.params = {
+        P("freq_hz", "Freq",   "Hz", 500.0f, 12000.0f, 3000.0f, Taper::Log),
+        P("amount",  "Amount", "",     1.0f,    20.0f,    4.0f, Taper::Log),
+        P("mix",     "Mix",    "",     0.0f,     1.0f,    0.0f),
+    };
+    m.factory = mk<FxExciter>();
+    return m;
+}
+
+// ===========================================================================
+// fx.gate - noise gate
+// ===========================================================================
+class FxGate final : public ParamHolder<4> {
+public:
+    enum { kThresholdDb, kAttackMs, kHoldMs, kReleaseMs };
+
+    void prepare(const ModulePrepareInfo& info) override { sr_ = info.sampleRate; reset(); }
+    void reset() noexcept override { env_ = 0.0f; gain_ = 0.0f; holdLeft_ = 0; }
+
+    void process(const ProcessArgs& a) noexcept override {
+        const float thr = dbToGain(clampT(p(kThresholdDb), -80.0f, 0.0f));
+        const float atk = std::exp(-1.0f / (std::max(p(kAttackMs), 0.1f) * 0.001f * static_cast<float>(sr_)));
+        const float rel = std::exp(-1.0f / (std::max(p(kReleaseMs), 1.0f) * 0.001f * static_cast<float>(sr_)));
+        const int   hold = static_cast<int>(std::max(p(kHoldMs), 0.0f) * 0.001f * static_cast<float>(sr_));
+
+        for (int n = 0; n < a.numSamples; ++n) {
+            const float peak = std::max(std::abs(a.in[0][n]), std::abs(a.in[1][n]));
+            env_ = peak > env_ ? peak : peak + rel * (env_ - peak);
+
+            if (env_ > thr) holdLeft_ = hold;
+            else if (holdLeft_ > 0) --holdLeft_;
+
+            const float target = (env_ > thr || holdLeft_ > 0) ? 1.0f : 0.0f;
+            const float coef = target > gain_ ? atk : rel;
+            gain_ = target + coef * (gain_ - target);
+
+            a.out[0][n] = a.in[0][n] * gain_;
+            a.out[1][n] = a.in[1][n] * gain_;
+        }
+    }
+
+private:
+    double sr_ = 48000.0;
+    float  env_ = 0.0f, gain_ = 0.0f;
+    int    holdLeft_ = 0;
+};
+
+ModuleManifest manifestFxGate() {
+    ModuleManifest m;
+    m.type = "fx.gate"; m.category = "effect";
+    m.summary = "Noise gate. Silences the signal below the threshold - tightens loose tails, removes hiss between notes, and with a fast release turns sustained sounds into stuttering rhythmic ones.";
+    m.allowVoice = false; m.allowGlobal = true;
+    m.audioIns = 1; m.audioOuts = 1; m.costWeight = 0.4f;
+    m.params = {
+        P("threshold_db", "Thresh",  "dB", -80.0f,    0.0f, -80.0f),
+        P("attack_ms",    "Attack",  "ms",   0.1f,  100.0f,   1.0f, Taper::Log),
+        P("hold_ms",      "Hold",    "ms",   0.0f,  500.0f,  20.0f, Taper::Log),
+        P("release_ms",   "Release", "ms",   1.0f, 2000.0f, 120.0f, Taper::Log),
+    };
+    m.factory = mk<FxGate>();
+    return m;
+}
+
 } // namespace
 
 void registerProductionModules(std::vector<ModuleManifest>& out) {
+    out.push_back(manifestFxFlanger());
+    out.push_back(manifestFxRingMod());
+    out.push_back(manifestFxAutoPan());
+    out.push_back(manifestFxExciter());
+    out.push_back(manifestFxGate());
     out.push_back(manifestFxEq3());
     out.push_back(manifestFilterCrossover());
     out.push_back(manifestFilterFormant());
@@ -800,6 +1399,7 @@ void registerProductionModules(std::vector<ModuleManifest>& out) {
     out.push_back(manifestFxDimension());
     out.push_back(manifestFxPitch());
     out.push_back(manifestOscKarplus());
+    out.push_back(manifestFxCabinet());
     out.push_back(manifestModSequencer());
 }
 

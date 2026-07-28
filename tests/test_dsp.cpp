@@ -129,6 +129,34 @@ TEST_CASE(every_canned_instrument_builds_and_sounds) {
     }
 }
 
+// KNOWN FAILURE - regressed during the Karplus/macro work, cause not isolated.
+//
+// `porcelain_pluck` holds its voice indefinitely after noteOff: the output sits
+// at a flat 0.4665 for at least seven seconds instead of releasing over its
+// 300 ms release time. Established so far:
+//
+//   - It is the VOICE, not the effects. Zeroing delay_mix, delay_fb and
+//     reverb_mix changes nothing (0.4665 either way).
+//   - It is NOT the macro change. The failure reproduces identically with the
+//     old additive-from-zero macro semantics and with the new neutral-at-rest
+//     ones, verified by rebuilding both ways.
+//   - This instrument contains no Karplus string, so the string rewrite cannot
+//     be reaching it directly.
+//
+// A flat, non-decaying level means the amplitude envelope is stuck in SUSTAIN,
+// not in a slow release: `amp.gain` has a modBase of 0 and is driven solely by
+// `env_amp`, so a constant output can only mean a constant envelope value.
+// `noteOff` is therefore not reaching that envelope.
+//
+// Reading of GraphInstance::noteOff has not found the reason. It matches on
+// `v.active && v.note == midiNote && v.held`, all of which should hold here,
+// and `sustain_` is properly initialised to false so the pedal early-out is not
+// firing. The next step is to print `v.held`, `v.note` and `v.ctx.gate` at the
+// moment noteOff is called - a five-line change that was not worth starting
+// with no room left to act on the answer.
+//
+// Left failing on purpose: a voice that is never handed back means polyphony
+// leaks and the instrument stops responding after N notes.
 TEST_CASE(voices_are_released_and_reclaimed) {
     ir::IrReport report;
     auto graph = buildFromJson(forge::llm::cannedLibrary()[2].json, report);  // pluck

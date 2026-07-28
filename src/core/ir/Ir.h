@@ -15,6 +15,7 @@
 #include "core/Common.h"
 
 #include <nlohmann/json.hpp>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -103,11 +104,38 @@ struct ParamSpec {
     std::string            unit;
     float                  min = 0.0f, max = 1.0f, def = 0.5f;
     Taper                  taper   = Taper::Linear;
-    std::string            control = "knob";  ///< knob | slider | switch | combo
-    std::string            group   = "General";
+    /// knob | vslider | hslider | toggle | combo
+    ///
+    /// Real instruments do not use one control for everything. A pitch fader
+    /// is vertical because pitch is up and down; a blend or a rate reads
+    /// better as a horizontal travel; an on/off is a switch, not a knob turned
+    /// to its extreme. Letting the model choose gives each instrument its own
+    /// feel rather than the same wall of circles.
+    std::string            control = "knob";
+    std::string            group   = "General";  ///< the tab
+    /// Sub-panel within the tab. Without this the rack is a flat wall of knobs
+    /// and a label like "Wow" has no context telling you it belongs to a tape
+    /// machine - which reads as gibberish, however real the DSP behind it is.
+    std::string            panel   = "";
     std::vector<ParamBind> bind;
 
     float defaultNormalised() const { return removeTaper(def, min, max, taper); }
+};
+
+/// A construction-time setting exposed as a UI control.
+///
+/// Settings (oscillator wave, filter mode, delay division, LFO shape...) are
+/// not automatable - changing one rebuilds the graph. But leaving them out of
+/// the panel entirely meant a generated instrument had no way to switch from
+/// saw to square, which is the single most basic thing anyone expects of a
+/// synth. Changing one triggers a rebuild and a crossfade, so it is seamless.
+struct SwitchSpec {
+    std::string id;
+    std::string label;
+    std::string node;
+    std::string setting;
+    std::string group = "General";
+    std::string panel = "";
 };
 
 struct MacroRoute {
@@ -133,6 +161,27 @@ struct UiSpec {
     std::string              mood   = "neutral";
     std::vector<UiSection>   sections;
     std::vector<std::string> macroRow;
+
+    /// Per-panel accent, keyed by panel title. The model colours the panel
+    /// blocks itself, so two instruments built from the same modules still
+    /// look like different instruments.
+    std::map<std::string, std::string> panelAccent;
+    /// Panels the model wants rendered larger - the ones that define this
+    /// sound. A page where everything is the same size has no focal point.
+    std::vector<std::string> featuredPanels;
+
+    /// The visual language of the whole instrument.
+    ///
+    /// "sharp"    angular pointers, tick marks, tight rectangles - clinical,
+    ///            utilitarian, the look of a mastering tool
+    /// "soft"     thick rounded arcs, no ticks, generous spacing - warm and
+    ///            hand-made
+    /// "vintage"  cream faces, chunky caps, engraved lettering
+    /// "minimal"  hairline indicators, almost no chrome
+    ///
+    /// A cold technical request and a warm groovy one should not arrive
+    /// looking like the same product in different colours.
+    std::string style = "sharp";
 };
 
 struct Instrument {
@@ -150,9 +199,10 @@ struct Instrument {
     std::vector<NodeSpec>  nodes;
     std::vector<AudioConn> audio;
     std::vector<ModRoute>  mod;
-    std::vector<ParamSpec> params;
-    std::vector<MacroSpec> macros;
-    UiSpec                 ui;
+    std::vector<ParamSpec>  params;
+    std::vector<SwitchSpec> switches;
+    std::vector<MacroSpec>  macros;
+    UiSpec                  ui;
 
     const NodeSpec* findNode(const std::string& id) const;
     NodeSpec*       findNode(const std::string& id);

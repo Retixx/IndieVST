@@ -2,7 +2,9 @@
 
 #include "core/llm/CannedLibrary.h"
 #include "core/llm/PromptBuilder.h"
+#include "core/llm/JsonSalvage.h"
 #include "core/llm/ResponseExtract.h"
+#include "core/llm/StreamAssembler.h"
 
 #include <nlohmann/json.hpp>
 
@@ -79,6 +81,7 @@ juce::String HttpLlmProvider::buildBody(const GenerationRequest& req, bool inclu
                 {"model", config_.effectiveModel().toStdString()},
                 {"messages", all},
                 {"max_tokens", req.maxTokens},
+                {"stream", true},
                 {"response_format", {{"type", "json_object"}}}
             };
             if (includeTuning) body["temperature"] = req.temperature;
@@ -91,7 +94,7 @@ juce::String HttpLlmProvider::buildBody(const GenerationRequest& req, bool inclu
             body = {
                 {"model", config_.effectiveModel().toStdString()},
                 {"messages", all},
-                {"stream", false},
+                {"stream", true},
                 {"format", "json"},
                 {"options", {{"num_predict", req.maxTokens}}}
             };
@@ -116,7 +119,11 @@ juce::String HttpLlmProvider::buildBody(const GenerationRequest& req, bool inclu
                      {"cache_control", {{"type", "ephemeral"}}}}
                 })},
                 {"messages", messages},
-                {"max_tokens", req.maxTokens}
+                {"max_tokens", req.maxTokens},
+                // Streamed, always. See StreamAssembler: without it no bytes
+                // move until the model has finished, and JUCE's per-read
+                // timeout turns a slow generation into a dead connection.
+                {"stream", true}
             };
             // NOTE: no temperature / top_p / top_k. Claude Sonnet 5 rejects any
             // non-default sampling parameter with a 400 - adaptive thinking is
@@ -154,19 +161,38 @@ GenerationResult HttpLlmProvider::generate(const GenerationRequest& req,
     }
 
     int statusCode = 0;
-    juce::String body;
+    juce::String body;            ///< only populated for error responses
+    std::string  streamed;        ///< the assistant text, reassembled
+    std::string  streamError;
+    bool         streamComplete = false;
+    bool         deadlineHit    = false;
 
-    // Note: this read blocks. Cancellation is checked around it and enforced by
-    // the timeout - the session treats a late result as stale rather than
-    // trying to tear the socket down underneath JUCE.
+    const auto wire = config_.provider == ForgeConfig::Provider::OpenAi
+                        ? StreamAssembler::Wire::OpenAiSse
+                        : config_.provider == ForgeConfig::Provider::Ollama
+                            ? StreamAssembler::Wire::OllamaJsonLines
+                            : StreamAssembler::Wire::AnthropicSse;
+
+    // Note: these reads block. Cancellation is checked between them and
+    // enforced by the deadline - the session treats a late result as stale
+    // rather than trying to tear the socket down underneath JUCE.
     auto send = [&](bool includeTuning) -> bool {
         statusCode = 0;
+        body = {};
+        streamed.clear();
+        streamError.clear();
+        streamComplete = false;
+
         juce::StringPairArray responseHeaders;
         juce::URL url = juce::URL(endpoint()).withPOSTData(buildBody(req, includeTuning));
 
+        // The timeout JUCE takes here is per operation, not for the whole
+        // exchange. With a stream that is exactly what is wanted: it should
+        // fire when nothing has arrived for a while, not when the model is
+        // simply taking its time. The overall budget is enforced below.
         auto options = juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inPostData)
                            .withExtraHeaders(extraHeaders())
-                           .withConnectionTimeoutMs(req.timeoutMs)
+                           .withConnectionTimeoutMs(juce::jlimit(5000, 45000, req.timeoutMs))
                            .withResponseHeaders(&responseHeaders)
                            .withStatusCode(&statusCode)
                            .withNumRedirectsToFollow(3)
@@ -174,7 +200,29 @@ GenerationResult HttpLlmProvider::generate(const GenerationRequest& req,
 
         std::unique_ptr<juce::InputStream> stream(url.createInputStream(options));
         if (stream == nullptr) return false;
-        body = stream->readEntireStreamAsString();
+
+        // An error response is a plain JSON body, not a stream. Read it whole
+        // and let the existing extractors explain it.
+        if (statusCode >= 400) { body = stream->readEntireStreamAsString(); return true; }
+
+        StreamAssembler assembler(wire);
+        std::vector<char> chunk(16384);
+        const double deadline = start + req.timeoutMs;
+
+        while (!stream->isExhausted()) {
+            if (shouldCancel && shouldCancel()) break;
+            if (juce::Time::getMillisecondCounterHiRes() > deadline) { deadlineHit = true; break; }
+
+            const int got = stream->read(chunk.data(), static_cast<int>(chunk.size()));
+            if (got <= 0) break;
+            assembler.feed(chunk.data(), static_cast<size_t>(got));
+            if (assembler.complete()) break;
+        }
+        assembler.finish();
+
+        streamed       = assembler.text();
+        streamError    = assembler.error();
+        streamComplete = assembler.complete();
         return true;
     };
 
@@ -196,14 +244,14 @@ GenerationResult HttpLlmProvider::generate(const GenerationRequest& req,
 
     if (!reached) {
         const int elapsed = static_cast<int>(result.latencyMs);
-        // Distinguish "gave up waiting" from "never connected": with a large
-        // prompt and adaptive thinking, a timeout is by far the more likely of
-        // the two and needs a completely different fix.
+        // Distinguish "gave up waiting" from "never connected". Now that the
+        // response is streamed, the first is far less likely than it was and
+        // means something is genuinely wrong with the connection rather than
+        // that the model was slow.
         if (elapsed >= req.timeoutMs - 500) {
             result.errorMessage = "Timed out after " + std::to_string(elapsed / 1000)
-                                + "s with no data received. If FORGE_THINKING is "
-                                  "'adaptive', set it to 'off' - JUCE times out per read, "
-                                  "and no bytes arrive while the model is thinking.";
+                                + "s without the connection opening at all. Check the "
+                                  "network, any proxy or firewall, and the base URL.";
         } else {
             result.errorMessage = "Could not reach " + endpoint().toStdString()
                                 + " (no response after " + std::to_string(elapsed)
@@ -232,27 +280,52 @@ GenerationResult HttpLlmProvider::generate(const GenerationRequest& req,
         return result;
     }
 
-    std::string error;
-    std::string content;
-    switch (config_.provider) {
-        case ForgeConfig::Provider::OpenAi: content = extractOpenAiContent(body.toStdString(), error); break;
-        case ForgeConfig::Provider::Ollama: content = extractOllamaContent(body.toStdString(), error); break;
-        default:                            content = extractAnthropicContent(body.toStdString(), error); break;
-    }
+    const std::string content = streamed;
 
-    if (!error.empty()) { result.errorMessage = error; return result; }
-
-    const std::string extracted = extractJsonObject(content);
-    if (extracted.empty()) {
-        result.errorMessage = "The model did not return a JSON object.";
+    // A stream that reported an error and produced nothing is a failure; one
+    // that reported an error after most of a patch had already arrived is worth
+    // salvaging, and the note says so.
+    if (content.empty()) {
+        result.errorMessage = !streamError.empty()
+            ? streamError
+            : (deadlineHit
+                 ? ("Gave up after " + std::to_string(static_cast<int>(result.latencyMs) / 1000)
+                    + "s. The connection opened but the model sent nothing usable.")
+                 : std::string("The model returned an empty response."));
         return result;
     }
+
+    // Be generous about the shape of the reply and strict about the result.
+    // A design that arrived wrapped in prose, or that got cut off by a read
+    // timeout with 95% of the patch already sent, is worth far more than
+    // throwing the whole generation away and dropping the musician onto a
+    // canned instrument.
+    const auto salvaged = llm::salvageJsonObject(content);
+    if (!salvaged) {
+        result.errorMessage = salvaged.note.empty()
+                                ? "The model did not return a JSON object."
+                                : salvaged.note;
+        return result;
+    }
+    const std::string extracted = salvaged.json;
+    result.salvageNote = salvaged.note;
+
+    // Say so when the design was rescued from a stream that stopped early,
+    // rather than presenting a repaired patch as one that arrived clean.
+    if (!streamComplete && result.salvageNote.empty())
+        result.salvageNote = deadlineHit
+            ? "The model was still writing when time ran out; the design was completed "
+              "from what had arrived."
+            : "The connection closed before the model finished; the design was completed "
+              "from what had arrived.";
+    if (!streamError.empty())
+        result.salvageNote += "  (" + streamError + ")";
 
     if (config_.logRawResponses) {
         ForgeConfig::logsDirectory().createDirectory();
         const auto file = ForgeConfig::logsDirectory().getChildFile(
             "response-" + juce::Time::getCurrentTime().formatted("%Y%m%d-%H%M%S") + ".json");
-        file.replaceWithText(body);
+        file.replaceWithText(juce::String(content));
     }
 
     result.ok     = true;
